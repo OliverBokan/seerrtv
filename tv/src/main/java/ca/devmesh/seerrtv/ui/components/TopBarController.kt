@@ -7,6 +7,7 @@ import android.content.Context
 import ca.devmesh.seerrtv.ui.focus.AppFocusManager
 import ca.devmesh.seerrtv.ui.focus.AppFocusState
 import ca.devmesh.seerrtv.ui.focus.DpadController
+import ca.devmesh.seerrtv.navigation.baseRoute
 import ca.devmesh.seerrtv.ui.focus.TopBarFocus
 import ca.devmesh.seerrtv.ui.focus.createTopBarDpadConfig
 import android.util.Log
@@ -60,7 +61,7 @@ fun TopBarController(
             is AppFocusState.TopBar -> {
                 // Return to the calling screen based on current route
                 val currentRoute = navController.currentDestination?.route
-                val baseRoute = currentRoute?.substringBefore("/")
+                val baseRoute = baseRoute(currentRoute)
                 when {
                     currentRoute == "main" -> {
                         if (BuildConfig.DEBUG) {
@@ -124,7 +125,7 @@ fun TopBarController(
     // or they could never leave Settings (LaunchedEffect would keep resetting to Settings on every focus change).
     LaunchedEffect(appFocusManager.currentFocus) {
         val currentRoute = navController.currentDestination?.route
-        val baseRoute = currentRoute?.substringBefore("/")
+        val baseRoute = baseRoute(currentRoute)
         val focus = appFocusManager.currentFocus
         if (focus is AppFocusState.TopBar && baseRoute == "search" && focus.focus == TopBarFocus.Search) {
             appFocusManager.setFocus(AppFocusState.TopBar(TopBarFocus.Settings))
@@ -316,7 +317,7 @@ fun TopBarController(
         when (val focus = appFocusManager.currentFocus) {
             is AppFocusState.TopBar -> {
                 val currentRoute = navController.currentDestination?.route
-                val baseRoute = currentRoute?.substringBefore("/")
+                val baseRoute = baseRoute(currentRoute)
                 when {
                     currentRoute == "main" -> {
                         if (BuildConfig.DEBUG) Log.d("TopBarController", "🔄 handleBack: Returning to MainScreen")

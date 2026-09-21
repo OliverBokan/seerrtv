@@ -1635,6 +1635,10 @@ fun MainScreen(
         if (BuildConfig.DEBUG) {
             Log.d("MainScreen", "🔍 LaunchedEffect(initialFocus): currentBackStackEntry=$currentBackStackEntry, skipDiscovery=${currentBackStackEntry == "discovery_to_main"}, skipSettings=${currentBackStackEntry == "settings_to_main"}")
         }
+        // Main can still be composed after navigating away: a cold-start deep link passes through
+        // it on the way to its target and the rows finish loading during the exit transition.
+        // Setting focus then would take it from the screen the deep link opened.
+        if (navController.currentDestination?.route != "main") return@LaunchedEffect
         // Only set initial focus when we have data loaded and not in initial load state
         // Skip this logic when returning from discovery/settings/details to preserve restored focus state
         if (!isInitialLoad && allActiveRows.isNotEmpty() && currentBackStackEntry != "discovery_to_main" && currentBackStackEntry != "settings_to_main" && currentBackStackEntry != "details_to_main") {

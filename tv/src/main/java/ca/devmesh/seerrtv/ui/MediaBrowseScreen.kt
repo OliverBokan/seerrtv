@@ -295,9 +295,15 @@ fun MediaBrowseScreen(
     // for them raced that search and could overwrite its results with unfiltered discover data.
     LaunchedEffect(searchQuery) {
         if (searchQuery.isEmpty()) {
-            // Trigger browse with current filters and sort
-            val filters = currentFilters ?: BrowseModels.MediaFilters.default(mediaType)
-            val sort = currentSort
+            // Trigger browse with current filters and sort. Read the ViewModel directly: this runs
+            // in the same frame as the initializer above, before the collected `currentFilters`
+            // catches up, so after visiting the other browse screen it still held that screen's
+            // filters. Browsing with them stored Movie filters on Series (or vice versa), and the
+            // next return from details saw the mismatch, re-initialized, and replaced an active
+            // search with the default list.
+            val filters = viewModel.currentFilters.value?.takeIf { it.mediaType == mediaType }
+                ?: BrowseModels.MediaFilters.default(mediaType)
+            val sort = viewModel.currentSort.value
             when (mediaType) {
                 MediaType.MOVIE -> viewModel.browseMovies(filters, sort)
                 MediaType.TV -> viewModel.browseSeries(filters, sort)
@@ -764,10 +770,12 @@ fun MediaBrowseScreen(
                     },
                     hasSearchResults = searchResults.isNotEmpty(),
                     onNavigateToResults = {
-                        // Move to first grid item
+                        // Move to first grid item. AppFocusManager moves too, as the D-pad Down
+                        // handler does, so the grid owns focus rather than just the highlight.
                         selectedRow = 0
                         selectedColumn = 0
                         focusedItem = BrowseFocusedItem.Grid
+                        appFocusManager.focusBrowseScreen(BrowseFocusState.Grid(0, 0))
                         // Ensure first row is visible
                         coroutineScope.launch {
                             gridState.scrollToItem(0)
@@ -775,8 +783,12 @@ fun MediaBrowseScreen(
                     },
                     requestKeyboardTrigger = searchKeyboardTrigger,
                     onFocusLost = {
-                        appFocusManager.focusBrowseScreen(BrowseFocusState.Search)
-                        focusedItem = BrowseFocusedItem.Search
+                        // Leaving the field via Down/Done moves to the grid before focus clears;
+                        // don't pull the selection back onto the search bar.
+                        if (focusedItem != BrowseFocusedItem.Grid) {
+                            appFocusManager.focusBrowseScreen(BrowseFocusState.Search)
+                            focusedItem = BrowseFocusedItem.Search
+                        }
                         refocusControllerTick++
                     }
                 )

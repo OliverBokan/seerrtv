@@ -1,10 +1,10 @@
 [versions]
-agp = "9.4.0"
+agp = "9.4.1"
 # Baseline profile generation: the gradle plugin and the macrobenchmark runner ship from the
 # same androidx.benchmark release train, so keep them on one version.
 benchmark = "1.5.0"
-coilKtCoilCompose = "3.6.2"
-coilNetworkOkhttp = "3.6.2"
+coilKtCoilCompose = "3.6.3"
+coilNetworkOkhttp = "3.6.3"
 core = "3.5.4"
 coreVersion = "13.0.0"
 hiltAndroid = "2.60.1"
@@ -24,7 +24,7 @@ activityCompose = "1.13.0"
 lifecycleViewmodelKtx = "2.11.0"
 navigationCompose = "2.9.8"
 lifecycleRuntimeComposeAndroid = "2.11.0"
-ktor = "3.5.2"
+ktor = "3.6.0"
 desugarJdkLibs = "2.1.5"
 detekt = "1.23.8"
 errorProneAnnotations = "2.50.0"

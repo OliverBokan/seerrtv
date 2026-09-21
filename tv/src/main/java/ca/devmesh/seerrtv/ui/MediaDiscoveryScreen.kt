@@ -92,6 +92,10 @@ fun MediaDiscoveryScreen(
     var selectedRow by rememberSaveable { mutableIntStateOf(0) }
     var selectedColumn by rememberSaveable { mutableIntStateOf(0) }
     var searchQuery by rememberSaveable { mutableStateOf(if (discoveryType == DiscoveryType.SEARCH) initialKeyword else "") }
+    // The deep-link query last copied into searchQuery. A warm deep link reuses this screen
+    // (launchSingleTop) with a new query, which must replace the box's text; returning from
+    // details delivers the same query again, which must not overwrite what the user typed since.
+    var appliedInitialKeyword by rememberSaveable { mutableStateOf(initialKeyword) }
 
     // Create a unique key for this screen's state
     val screenKey = remember(discoveryType, initialKeyword) {
@@ -587,23 +591,33 @@ fun MediaDiscoveryScreen(
         // refetch then replaced the whole list with page 1 (80 items down to 20), which put the
         // grid's restored scroll position out of range — it clamped to the end of the short list,
         // and the selected title was nowhere near the viewport once pagination refilled it.
-        if (!viewModel.isShowingResultsFor(discoveryType, initialKeyword)) {
-            if (discoveryType != DiscoveryType.SEARCH) {
-                // Mark as initial load when switching to keyword discovery
-                isInitialLoad = true
-                when (discoveryType) {
-                    DiscoveryType.MOVIE_KEYWORDS -> viewModel.discoverMoviesByKeyword(initialKeyword)
-                    DiscoveryType.TV_KEYWORDS -> viewModel.discoverTVByKeyword(initialKeyword)
-                    DiscoveryType.MOVIE_GENRE -> viewModel.discoverMoviesByGenre(initialKeyword)
-                    DiscoveryType.SERIES_GENRE -> viewModel.discoverTVByGenre(initialKeyword)
-                    DiscoveryType.STUDIO -> viewModel.discoverMoviesByStudio(initialKeyword)
-                    DiscoveryType.NETWORK -> viewModel.discoverTVByNetwork(initialKeyword)
-                }
-            } else if (initialKeyword.isNotEmpty()) {
-                // Mark as initial load when using initial keyword for search
-                isInitialLoad = true
+        //
+        // Search is matched on the query this screen shows, not the one it was opened with:
+        // searchQuery is saveable, so returning from details still holds what the user typed. The
+        // ViewModel is shared by every results screen, so a search opened with an empty box has to
+        // clear whatever an earlier search (e.g. from a deep link) left behind.
+        if (discoveryType == DiscoveryType.SEARCH) {
+            if (initialKeyword != appliedInitialKeyword) {
+                appliedInitialKeyword = initialKeyword
                 searchQuery = initialKeyword
-                viewModel.debouncedSearch(initialKeyword)
+            }
+            if (searchQuery.isEmpty()) {
+                viewModel.debouncedSearch("")
+            } else if (!viewModel.isShowingResultsFor(discoveryType, searchQuery)) {
+                isInitialLoad = true
+                viewModel.debouncedSearch(searchQuery)
+            }
+        } else if (!viewModel.isShowingResultsFor(discoveryType, initialKeyword)) {
+            // Mark as initial load when switching to keyword discovery
+            isInitialLoad = true
+            when (discoveryType) {
+                DiscoveryType.MOVIE_KEYWORDS -> viewModel.discoverMoviesByKeyword(initialKeyword)
+                DiscoveryType.TV_KEYWORDS -> viewModel.discoverTVByKeyword(initialKeyword)
+                DiscoveryType.MOVIE_GENRE -> viewModel.discoverMoviesByGenre(initialKeyword)
+                DiscoveryType.SERIES_GENRE -> viewModel.discoverTVByGenre(initialKeyword)
+                DiscoveryType.STUDIO -> viewModel.discoverMoviesByStudio(initialKeyword)
+                DiscoveryType.NETWORK -> viewModel.discoverTVByNetwork(initialKeyword)
+                DiscoveryType.SEARCH -> Unit // handled above
             }
         }
     }
@@ -673,9 +687,9 @@ fun MediaDiscoveryScreen(
                                     totalItems = searchResults.size
                                 )
                             ) {
-                                selectedRow = 0
-                                selectedColumn = 0
-                                focusedItem = FocusedItem.Grid
+                                // Go through the shared path so AppFocusManager moves to the grid too;
+                                // setting only the local highlight left Enter routed to the search bar.
+                                updateFocusAndSelection(FocusedItem.Grid, 0, 0)
                                 // Ensure first row is visible
                                 coroutineScope.launch {
                                     gridState.scrollToItem(0)
@@ -685,8 +699,12 @@ fun MediaDiscoveryScreen(
                         requestKeyboardTrigger = searchKeyboardTrigger,
                         onFocusLost = {
                             isSearchTextFieldFocused = false
-                            appFocusManager.focusDiscoveryScreen(DiscoveryFocusState.Search)
-                            focusedItem = FocusedItem.Search
+                            // Leaving the field via Down/Done moves to the grid before focus clears;
+                            // don't pull the selection back onto the search bar.
+                            if (focusedItem != FocusedItem.Grid) {
+                                appFocusManager.focusDiscoveryScreen(DiscoveryFocusState.Search)
+                                focusedItem = FocusedItem.Search
+                            }
                             refocusControllerTick++
                         }
                     )
@@ -1194,9 +1212,11 @@ fun MediaDiscoveryScreen(
         // Register screen with DPAD controller
         dpadController.registerScreen(dpadConfig)
 
-        // Only set search focus if we're not returning from details and there are no results
+        // Start on the search bar unless returning from details, which restores the grid. This
+        // includes a search opened with a query by a deep link: skipping it there left the focus
+        // state on the previous screen, so nothing was highlighted until the first key press.
         val isReturningFromManager = GridPositionManager.isReturningFromDetails(screenKey)
-        if (discoveryType == DiscoveryType.SEARCH && initialKeyword.isEmpty() &&
+        if (discoveryType == DiscoveryType.SEARCH &&
             !isReturningFromDetails && !isReturningFromManager) {
             focusedItem = FocusedItem.Search
             appFocusManager.focusDiscoveryScreen(DiscoveryFocusState.Search)

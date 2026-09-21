@@ -25,16 +25,16 @@ import org.junit.Test
  */
 class ProfileStorageCompatTest {
 
-    /** Exact field shape written by 0.28.10, with credentials replaced by placeholders. */
+    /** Exact field shape written by 0.28.10, with credentials and identifiers replaced by placeholders. */
     private val legacyProfilesJson = """
-        [{"id":"e5774b30-9341-4912-aac4-25c2de72170c","name":"moem87","email":null,
-        "avatar_initials":"MO","avatar_color":"PURPLE",
+        [{"id":"e5774b30-9341-4912-aac4-25c2de72170c","name":"testuser","email":null,
+        "avatar_initials":"TE","avatar_color":"PURPLE",
         "remote_avatar_url":"https://plex.tv/users/abc/avatar?c=1",
         "pin_hash":"","config":{"protocol":"http","hostname":"seerr.example.com",
         "cloudflare_enabled":false,"cf_client_id":"","cf_client_secret":"","auth_type":"plex",
         "api_key":"","username":"","password":"","jellyfin_hostname":"","jellyfin_port":8096,
         "jellyfin_use_ssl":false,"jellyfin_url_base":"/","jellyfin_email":"",
-        "plex_client_id":"f637851f-b1d5-44ae-a6fc-21c03b0f60f3","plex_auth_token":"token",
+        "plex_client_id":"00000000-0000-4000-8000-000000000000","plex_auth_token":"token",
         "is_submitted":true,"created_at":"1783155866983"},
         "settings":{"app_language":"es","discovery_language":"es",
         "default_streaming_region":"CA","folder_selection_enabled":true,
@@ -50,8 +50,8 @@ class ProfileStorageCompatTest {
 
         val profile = profiles.first()
         assertEquals("e5774b30-9341-4912-aac4-25c2de72170c", profile.id)
-        assertEquals("moem87", profile.name)
-        assertEquals("MO", profile.avatarInitials)
+        assertEquals("testuser", profile.name)
+        assertEquals("TE", profile.avatarInitials)
         assertEquals("PURPLE", profile.avatarColor)
         assertEquals("https://plex.tv/users/abc/avatar?c=1", profile.remoteAvatarUrl)
 

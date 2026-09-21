@@ -51,6 +51,7 @@ import ca.devmesh.seerrtv.data.SeerrApiService.ApiValidationResult
 import ca.devmesh.seerrtv.data.ApiResult
 import ca.devmesh.seerrtv.data.TrustAllCerts
 import ca.devmesh.seerrtv.navigation.LocalNavController
+import ca.devmesh.seerrtv.navigation.baseRoute
 import ca.devmesh.seerrtv.navigation.rememberNavigationManager
 import ca.devmesh.seerrtv.navigation.rememberNavigationCoordinator
 import ca.devmesh.seerrtv.theme.SeerrTVTheme
@@ -671,7 +672,7 @@ class MainActivity : AppCompatActivity() {
             // (2) resuming it when we return back to splash.
             var currentRouteForValidation by remember {
                 mutableStateOf(
-                    navController.currentDestination?.route?.split("/")?.firstOrNull()
+                    baseRoute(navController.currentDestination?.route)
                 )
             }
             var hasNavigatedToProfileSelect by remember { mutableStateOf(false) }
@@ -679,7 +680,7 @@ class MainActivity : AppCompatActivity() {
                 var previousBaseRoute: String? = null
                 val listener =
                     NavController.OnDestinationChangedListener { _, destination, _ ->
-                        val base = destination.route?.split("/")?.firstOrNull()
+                        val base = baseRoute(destination.route)
                         currentRouteForValidation = base
                         if (previousBaseRoute == "config" && base != "config" &&
                             SharedPreferencesUtil.isPendingNewProfileCreation(this@MainActivity)
@@ -822,7 +823,7 @@ class MainActivity : AppCompatActivity() {
                         val isAvatarFocusedNow = appFocusManager.currentFocus is AppFocusState.TopBar &&
                             (appFocusManager.currentFocus as AppFocusState.TopBar).focus == TopBarFocus.Avatar
                         val currentRouteLocal =
-                            navController.currentDestination?.route?.split("/")?.firstOrNull()
+                            baseRoute(navController.currentDestination?.route)
                         val topBarFocusState = TopBarFocusState(
                             isInTopBar = isInTopBarNow,
                             isSearchFocused = isSearchFocusedNow,
@@ -1420,7 +1421,7 @@ fun SeerrTVApp(
     // Track current route for top bar visibility (NavigationCoordinator handles focus state management)
     DisposableEffect(navController) {
         val listener = NavController.OnDestinationChangedListener { _, destination, _ ->
-            val newRoute = destination.route?.split("/")?.firstOrNull() ?: ""
+            val newRoute = baseRoute(destination.route)
             currentRoute = newRoute
             if (BuildConfig.DEBUG) {
                 val curr = navController.currentBackStackEntry?.destination?.route

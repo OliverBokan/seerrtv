@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.32.0
+
+### Fixed: Search results could not be reached or opened with the D-pad
+
+- **Symptom** – After typing a search and confirming it, D-pad Down did nothing and focus stayed on the search bar. If the first result did get highlighted, Enter reopened the keyboard instead of opening the title. The top bar was also missing from the search screen. Discover and genre rows were unaffected. Reported on a BenQ Android TV projector against 0.31.0, but present on every device since 0.30.0.
+
+- **Root cause** – 0.30.0 added external deep links and changed the search destination's route from `search` to `search?query={query}`. Every place that derives a screen name from the route took everything before the first `/`, and a query-only route has no `/`, so the search screen came out as `search?query={query}`. `MediaDiscoveryScreen` registers its D-pad handlers with `DpadController` under `search`, so no registered screen matched and every key on the search screen went unhandled. The same name kept `MainActivity` from showing the top bar and never matched the search checks in `TopBarController`. Mixed routes such as `mediaDiscovery/...?image=` still split cleanly, which is why the other grids kept working.
+
+  The highlight people did see came from the search field's own key handler, which draws the first result as selected without going through the controller. Enter does go through the controller, and with no screen registered, nothing handled it.
+
+  Reproduced on a Google TV emulator: every key on the search screen logged `MainActivity key event result: false`.
+
+- **Fix** –
+  - New `baseRoute()` returns a route's first path segment with the query string removed. `NavigationCoordinator`, `MainActivity` and `TopBarController` all use it, so `search?query={query}` resolves to `search` again. Covered by `BaseRouteTest`.
+  - Pressing Down in the search field now reaches the results in one press. Moving to the results used to set only the screen's own highlight, leaving the app-wide focus state on Search. Clearing the text field's focus then fired `onFocusLost`, which put the selection back on the search bar. Moving to the results now goes through the same path as grid navigation, and losing field focus no longer pulls the selection back once the grid is selected. Confirming a search (Done on the keyboard) also moves to the results before clearing focus. The Movies and Series browse screens use the same search bar, so they got the same two changes; without them, confirming a search there would have left focus on the search bar.
+
+- **Verified on a Google TV emulator** against a Seerr server: confirming a search moves to the first result. Down and Right move through the grid, Enter opens the title, and Back followed by Up returns to the search bar. From the search field with the keyboard closed, a single Down reaches the first result. The same flow was checked on the Movies and Series search bars: confirming lands on the first result, and Enter and Back work from there.
+
+### Fixed: A search deep link opened with nothing highlighted
+
+- **Symptom** – Opening `seerrtv://search?query=…` while SeerrTV wasn't running showed the results with no highlight on the search bar or the grid, until the first D-pad press.
+
+- **Root cause** – Two things. The search screen only set its starting focus when opened without a query. That check predates deep links, when search never received one. Fixing that alone wasn't enough: on a cold start the deep link passes through the main screen on its way to search, the main screen stays drawn during the exit transition, and its rows finished loading in that window. Its initial-focus effect then moved focus back to the first row, about 100ms after search had set it.
+
+- **Fix** – The search screen starts on the search bar whether or not it was opened with a query, unless it's returning from a title. The main screen's initial-focus effect now runs only while main is the current destination.
+
+### Fixed: Opening search showed the previous search's results
+
+- **Symptom** – After a search deep link, opening search from the top bar showed an empty search box above the deep link's results.
+
+- **Root cause** – Every results screen shares one discovery ViewModel. Opening search with an empty box didn't clear it, so whatever the last search loaded stayed on screen.
+
+- **Fix** – Search now loads for the query in its box: an empty box clears the results, and any other query that isn't already loaded is fetched. The box keeps what the user typed when they come back from a title. A new query from a warm deep link replaces the box's text because it differs from the last one applied, so a query the user edited isn't overwritten when they return from a title.
+
+- **Verified on a Google TV emulator**, together with the deep-link behaviour from 0.30.0 and 0.31.0: search and details links, cold and warm, a second link with a new query, Back returning to the calling app with SeerrTV kept running, and reopening SeerrTV from the launcher after a deep link. A normal launch still highlights the first row.
+
+### Fixed: Returning from a title replaced a Series search with the default list
+
+- **Symptom** – Search in Movies and open a title. Then open Series, search, open a title and press Back. Series showed its default popular list under the search text instead of the search results. It also happened with Series first and Movies second. Present in 0.31.0.
+
+- **Root cause** – Movies and Series share one ViewModel with a single set of filters. Opening Series after Movies first switched the filters to TV, but in the same frame the "load the browse grid" effect read its filters from collected state that hadn't caught up yet, so it still held Movies' filters. It browsed with them, which put Movie filters back into the ViewModel on the Series screen. Nothing looked wrong at that point. The next time Series came back from a title, it found filters for the wrong media type, re-initialized, and ran the default browse, which overwrote the search results.
+
+- **Fix** – The effect reads the filters and sort from the ViewModel itself and only uses filters whose media type matches the screen, falling back to that screen's defaults.
+
+- **Verified on a Google TV emulator** in both orders, Movies then Series and Series then Movies. The search results and selection come back after a title, and clearing the search box still restores the default list.
+
+### Changed: Dependency updates
+
+- Android Gradle Plugin 9.4.0 → 9.4.1
+- Coil 3.6.2 → 3.6.3
+- Ktor 3.5.2 → 3.6.0
+- Gradle Versions Plugin 0.62.0 → 0.64.0
+
+The Compose BOM stays on 2026.09.00, the latest stable. Navigation Compose stays on 2.9.8: 2.10.1 still requires `minSdk` 24 (checked in its AAR manifest), and this app supports API 23. See 0.31.0 for the full reasoning.
+
 ## 0.31.0
 
 ### Added: A baseline profile covering SeerrTV's own startup

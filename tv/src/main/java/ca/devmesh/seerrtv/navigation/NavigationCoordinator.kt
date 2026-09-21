@@ -65,7 +65,7 @@ class NavigationCoordinator(
     private fun handleRouteChange(destination: NavDestination) {
         val fullRoute = destination.route ?: ""
         // Logical route for focus/business rules (first path segment)
-        val newRoute = fullRoute.split("/").firstOrNull() ?: ""
+        val newRoute = baseRoute(fullRoute)
         val previousRouteValue = _currentRoute.value
         val previousDpadRoute = _currentDpadRoute.value
 
@@ -77,8 +77,8 @@ class NavigationCoordinator(
         }
         
         if (BuildConfig.DEBUG) {
-            val curr = navController.currentBackStackEntry?.destination?.route?.split("/")?.firstOrNull()
-            val prev = navController.previousBackStackEntry?.destination?.route?.split("/")?.firstOrNull()
+            val curr = baseRoute(navController.currentBackStackEntry?.destination?.route)
+            val prev = baseRoute(navController.previousBackStackEntry?.destination?.route)
             Log.d("NavigationCoordinator", "🔄 Route changed: $previousRouteValue -> $newRoute (full: ${destination.route}) | current=$curr, previous=$prev")
         }
         

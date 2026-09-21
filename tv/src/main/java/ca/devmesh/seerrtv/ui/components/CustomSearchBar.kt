@@ -120,10 +120,10 @@ fun CustomSearchBar(
                                 android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
                                     // Leave the TextField and drop into grid with one press when results exist
                                     if (hasSearchResults) {
-                                        // Navigate first, then clear focus
+                                        // Navigate first, then clear focus: the resulting onFocusLost
+                                        // sees the grid already selected and leaves it there
                                         onNavigateToResults()
                                         focusManager.clearFocus(force = true)
-                                        // Don't call onFocusLost here as it resets focus to Search
                                     } else {
                                         // If no results, just clear focus and let controller handle navigation
                                         focusManager.clearFocus(force = true)
@@ -161,8 +161,7 @@ fun CustomSearchBar(
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(
                     onDone = {
-                        focusManager.clearFocus()
-                        // Only navigate to grid if there are results
+                        // Navigate before clearing focus so onFocusLost doesn't reset to Search
                         if (hasSearchResults) {
                             onNavigateToResults()
                             Log.d(
@@ -170,6 +169,7 @@ fun CustomSearchBar(
                                 "🎮 Navigation: Done pressed, focusing first result"
                             )
                         }
+                        focusManager.clearFocus()
                     }
                 ),
                 singleLine = true,
