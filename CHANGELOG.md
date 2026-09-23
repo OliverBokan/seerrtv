@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.33.0
+
+### Fixed: A cancelled request could show up as "Error loading media"
+
+- **Symptom** – Settings > Diagnostics listed "Job was cancelled" entries (shown as `nn1: Job was cancelled` in release builds) alongside real server errors. Reported against 0.32.0 on a German-language TV, where eight of them appeared in the same minute as a burst of 500s from the user's server. The 500s were the server's own failed TMDB fetches (`"Unable to retrieve popular series."`). The cancellations came from the app.
+
+- **Root cause** – When the coroutine running a request is cancelled (for example, the home load it belongs to is replaced or its screen goes away), the in-flight request throws a `CancellationException`. `SeerrApiService` caught it with its generic `catch (e: Exception)`, recorded it in Diagnostics and returned an `ApiResult.Error`. The code after the call keeps running until it next suspends, so `SeerrViewModel` wrote that error into the row, which showed "Error loading media". The same applied to category cards, media details, Similar titles and the details polling failure count. A cancelled Radarr or Sonarr configuration load also replaced the saved servers with an empty error entry. That list is what the request dialog reads after the app is restored from process death.
+
+- **Fix** – `SeerrApiService.handleApiException` rethrows when the calling coroutine has been cancelled, before logging or recording anything. The check is on the coroutine's own state rather than the exception type, because Ktor also throws a `CancellationException` when `refreshHttpClient` closes the client mid-request, and that one is a real failure. The Radarr and Sonarr configuration loads rethrow on cancellation and leave their cache as it was. The nine `SeerrViewModel` handlers that turn an exception into UI state (home rows, category cards, media details, recently added, recent requests, similar titles, details polling) make the same check first. All loading flags on these paths are reset in `finally` blocks, so a cancellation that now propagates can't leave one stuck.
+
+- **Verified** – Compiled and unit tests pass. On a Google TV emulator the home screen, opening and leaving details pages, and search while typing all behave as before, with no errors logged. A cancellation mid-request could not be reproduced there: the test server answers in about 20ms and the emulator's network-delay setting didn't slow that traffic, so the before/after difference is established by the code path, not observed.
+
+### Added: Top bar icons show their name when highlighted
+
+- **Request** – A user kept forgetting which top bar icon was Movies and which was Series, and asked for hover text. TV remotes have no hover, so the name now appears for whichever icon has focus.
+
+- **Change** – When a top bar icon is highlighted, a small pill with its name fades in just below it. This covers Settings, Series, Movies, Search and the profile avatar ("Profiles", a new string translated into all ten app languages). The pill is drawn outside the icon's bounds, so showing it never moves the other icons. The avatar's pill is right-aligned so it stays on screen. The Movies and Series icons' screen-reader descriptions were hard-coded English and now use the app's translated names, the same ones as the pills.
+
+- **Fixed alongside** – The "Press UP to refresh all categories" hint was centered across the whole screen. In German it ran underneath the Settings icon. It is now centered in the space to the left of the icons.
+
+- **Verified** – On a Google TV emulator in English and German: each pill appears for the focused icon and clears when focus moves down into the rows. On the Series browse screen the Series icon is hidden and the remaining pills still line up. The German refresh hint no longer overlaps the icons.
+
+### Fixed: Tags picked in the request dialog were sent as text
+
+- **Symptom** – None reported. Found while comparing SeerrTV's request payload with Seerr's web app, after a community question about Prowlarr search categories. The categories turned out to come from Lidarr and Sonarr and have nothing to do with SeerrTV.
+
+- **Root cause** – The request dialog sent the tag IDs you picked as strings (`"tags": ["3"]`). Seerr's web app sends numbers, and Seerr compares them with the numeric default tags configured for the Sonarr or Radarr server. A string never matches a number, so Seerr always treated them as an override, even when they were the same tags. Sonarr and Radarr then received the IDs as strings mixed with the numeric ID of the per-user tag Seerr adds.
+
+- **Fix** – `MediaRequestBody.tags` is now a nullable `List<Int>`, and the dialog passes the IDs as numbers. When no tags are picked the field is left out, as the web app does, so Seerr applies the server's default tags and any override rules.
+
+- **Verified** – Compiled, and unit tests pass, including a new `MediaRequestBodyTest` that checks the encoded JSON: no `tags` key when none are picked, and numeric IDs when they are. Checked against Seerr's `MediaRequest.ts` and `MediaRequestSubscriber.ts` on `develop`. Not exercised against a live server, because that would add a title to the test server's Sonarr or Radarr and start a search.
+
+### Changed: README
+
+- The README now names [Seerr](https://github.com/seerr-team/seerr) as the primary backend, with Jellyseerr and Overseerr as legacy servers, and lists features added since it was last updated: server-driven home rows, Similar titles, blocklist and "Hide Available Items" support, watchlist, and root folder selection for movie requests.
+
 ## 0.32.0
 
 ### Fixed: Search results could not be reached or opened with the D-pad

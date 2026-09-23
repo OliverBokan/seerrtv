@@ -990,7 +990,7 @@ class RequestModalController(
 
         // Include selected tags if any are selected
         if (selectedTags.isNotEmpty()) {
-            request["tags"] = selectedTags.map { it.toString() }
+            request["tags"] = selectedTags.sorted()
         }
 
         // Only include userId when using API key authentication

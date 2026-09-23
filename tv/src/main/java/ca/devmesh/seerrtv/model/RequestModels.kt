@@ -42,7 +42,9 @@ data class MediaRequestBody(
     val profileId: Int? = null,
     val rootFolder: String? = null,
     val languageProfileId: Int? = null,
-    val tags: List<String> = emptyList()
+    // Sonarr/Radarr tag ids. Seerr compares these against its server defaults as numbers,
+    // and an empty list would override those defaults, so omit the field when none are picked.
+    val tags: List<Int>? = null
 )
 
 @Serializable

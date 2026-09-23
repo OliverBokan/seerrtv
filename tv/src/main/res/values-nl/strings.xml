@@ -383,6 +383,7 @@
     <!-- Browse Screen Strings -->
     <string name="browse_movies">Films</string>
     <string name="browse_series">Series</string>
+    <string name="topBar_profiles">Profielen</string>
     <string name="browse_noResults">Geen resultaten gevonden</string>
     
     <!-- Sort Menu Strings -->

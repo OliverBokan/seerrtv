@@ -24,6 +24,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.sync.Mutex
@@ -1096,6 +1098,8 @@ class SeerrViewModel @Inject constructor(
                 }
             }
         } catch (e: Exception) {
+            // Cancelled, not failed: rethrow instead of surfacing it as an error.
+            currentCoroutineContext().ensureActive()
             Log.e("SeerrTV", "Error loading category $categoryTitle: ${e.message}")
             if (handleApiError(e)) {
                 authErrorState.showError()
@@ -1351,6 +1355,8 @@ class SeerrViewModel @Inject constructor(
                 }
             }
         } catch (e: Exception) {
+            // Cancelled, not failed: rethrow instead of surfacing it as an error.
+            currentCoroutineContext().ensureActive()
             Log.e("SeerrTV", "Error loading category cards $categoryTitle: ${e.message}")
             if (handleApiError(e)) {
                 authErrorState.showError()
@@ -2054,6 +2060,8 @@ class SeerrViewModel @Inject constructor(
                 _currentMediaDetails.value = result
                 logDebug("Media details fetched for mediaId: $mediaId, mediaType: $mediaType")
             } catch (e: Exception) {
+                // Cancelled, not failed: rethrow instead of surfacing it as an error.
+                currentCoroutineContext().ensureActive()
                 logError("Error fetching media details: ${e.message}", e)
                 _currentMediaDetails.value = ApiResult.Error(e)
             } finally {
@@ -2114,6 +2122,8 @@ class SeerrViewModel @Inject constructor(
                 is ApiResult.Loading -> ApiResult.Loading()
             }
         } catch (e: Exception) {
+            // Cancelled, not failed: rethrow instead of surfacing it as an error.
+            currentCoroutineContext().ensureActive()
             logError("Exception in fetchMovieDetails: ${e.message}", e)
             ApiResult.Error(e)
         }
@@ -2138,6 +2148,8 @@ class SeerrViewModel @Inject constructor(
                 is ApiResult.Loading -> ApiResult.Loading()
             }
         } catch (e: Exception) {
+            // Cancelled, not failed: rethrow instead of surfacing it as an error.
+            currentCoroutineContext().ensureActive()
             logError("Exception in fetchTVDetails: ${e.message}", e)
             ApiResult.Error(e)
         }
@@ -2402,6 +2414,8 @@ class SeerrViewModel @Inject constructor(
                 is ApiResult.Loading -> ApiResult.Loading()
             }
         } catch (e: Exception) {
+            // Cancelled, not failed: rethrow instead of surfacing it as an error.
+            currentCoroutineContext().ensureActive()
             Log.e("SeerrTV", "Exception in fetchRecentlyAdded: ${e.message}")
             ApiResult.Error(e)
         }
@@ -2506,6 +2520,8 @@ class SeerrViewModel @Inject constructor(
                 is ApiResult.Loading -> ApiResult.Loading()
             }
         } catch (e: Exception) {
+            // Cancelled, not failed: rethrow instead of surfacing it as an error.
+            currentCoroutineContext().ensureActive()
             Log.e("SeerrTV", "Error in fetchRecentRequests: ${e.message}")
             ApiResult.Error(e)
         }
@@ -3185,6 +3201,8 @@ class SeerrViewModel @Inject constructor(
                 }
             }
         } catch (e: Exception) {
+            // Cancelled, not failed: rethrow instead of surfacing it as an error.
+            currentCoroutineContext().ensureActive()
             _similarMediaState.value = ApiResult.Error(e)
         }
     }
@@ -3500,6 +3518,8 @@ class SeerrViewModel @Inject constructor(
                 _isPollingActive.value = false
             }
         } catch (e: Exception) {
+            // Cancelled, not failed: rethrow instead of surfacing it as an error.
+            currentCoroutineContext().ensureActive()
             pollingFailureCount++
             Log.e(TAG, "❌ Polling cycle #$pollingCycleCount: Exception during update (failure #$pollingFailureCount): ${e.message}", e)
             _pollingLoadingState.value = LoadingState.ERROR

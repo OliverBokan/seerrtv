@@ -434,6 +434,7 @@
     <!-- Browse Screen Strings -->
     <string name="browse_movies">Filmek</string>
     <string name="browse_series">Sorozatok</string>
+    <string name="topBar_profiles">Profilok</string>
     <string name="browse_noResults">Nincs találat</string>
 
     <!-- Sort Menu Strings -->

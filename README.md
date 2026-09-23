@@ -1,12 +1,12 @@
 # SeerrTV
 
-[![AI developed with Cursor](https://img.shields.io/badge/AI_developed-Cursor-6C5CE7?style=for-the-badge&labelColor=black&logo=cursor&logoColor=white)](https://cursor.com)
+[![AI developed with Claude](https://img.shields.io/badge/AI_developed-Claude-D97757?style=for-the-badge&labelColor=black&logo=claude&logoColor=white)](https://claude.com/product/claude-code)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg?style=for-the-badge)
 ![GitHub release](https://img.shields.io/github/v/release/devmesh-git/seerrtv?style=for-the-badge)
 ![GitHub downloads](https://img.shields.io/github/downloads/devmesh-git/seerrtv/total?style=for-the-badge)
 [![Discord](https://img.shields.io/discord/1341827746070003815?color=5865F2&label=discord&labelColor=black&logo=discord&logoColor=white&style=for-the-badge)](https://discord.gg/nTFk3jHbk5)
 
-SeerrTV is an Android TV application that provides a comprehensive media browsing and request management interface for Seerr, Jellyseerr and, Overseerr media request systems. It enables users to browse, search, request, and monitor the status of media requests directly from their Android TV device.
+SeerrTV is an Android TV application that provides a comprehensive media browsing and request management interface for [Seerr](https://github.com/seerr-team/seerr), with continued support for the legacy Jellyseerr and Overseerr servers. It enables users to browse, search, request, and monitor the status of media requests directly from their Android TV device.
 
 ## Screenshots
 
@@ -33,7 +33,7 @@ SeerrTV is an Android TV application that provides a comprehensive media browsin
 - **Unified Browse Screens** - Dedicated Movies and Series browse screens with grid-based layout optimized for Android TV
 - **Advanced Filtering System** - Comprehensive filtering with 13+ filter categories:
   - Release Date / First Air Date (date range)
-  - Genres (multi-select with search)
+  - Genres (full TMDB genre list, multi-select with search)
   - Keywords (searchable multi-select)
   - Original Language (single selection)
   - Content Rating (multi-select with region support)
@@ -43,13 +43,16 @@ SeerrTV is an Android TV application that provides a comprehensive media browsin
   - Streaming Services (multi-select with region support)
 - **Sort Menu** - Sort by Popularity, Release Date, First Air Date, TMDB Rating, or Title (A→Z / Z→A) with bidirectional sorting
 - **Enhanced Search** - Real-time search with D-pad optimized navigation, inline results, and state preservation
-- **Category Browsing** - Browse by categories (Recently Added, Recent Requests, Trending, Popular Movies, Movie Genres, etc.)
+- **Server-Driven Home Rows** - Home rows (order, visibility and custom sliders) follow the discover settings configured on your Seerr server
 - **Detailed Media Information** - Cast, crew, ratings, and related content
 - **Dynamic Backdrop System** - Cycling backdrop images with gradient overlays
 - **Person Information** - Filmography browsing with biographical information
+- **Similar Titles** - Jump between related titles, with Back returning to the title you came from
 - **Category Exploration** - Browse by genres, studios, and networks with dedicated discovery screens
 - **Infinite Scroll Pagination** - Automatic loading of additional results as you browse
 - **State Preservation** - Grid position, selection, filters, and sort preferences preserved during navigation
+- **Blocklist & Hide Available** - Honours the server's blocklist and "Hide Available Items" settings per user, matching the Seerr web app (see [Backend Support](docs/SEERR_BACKEND_SUPPORT.md))
+- **Watchlist** - Add or remove titles from your watchlist on the details screen (Jellyfin/Emby profiles)
 
 ### Request Management
 - **Movie & TV Requests** - Request movies and TV shows with configurable options
@@ -58,13 +61,13 @@ SeerrTV is an Android TV application that provides a comprehensive media browsin
 - **HD/4K Support** - Separate request options for HD and 4K quality tiers
 - **Server Selection** - Choose from multiple Radarr/Sonarr servers when configured
 - **Quality Profile Selection** - Select from configured quality profiles
-- **Root Folder Selection** - Choose root folder for TV show requests (when enabled)
+- **Root Folder Selection** - Choose a root folder for movie and TV requests (when enabled), with free space shown per folder; defaults to the server's configured folder
 - **Season Selection** - Multi-select season picker for TV series
 - **Real-time Status Monitoring** - Monitor request status and download progress with automatic refresh
 - **Permission-Based Actions** - Support for different user permission levels (admin vs. regular user)
 - **Request Approval Workflow** - Administrators can approve/decline pending requests
 - **Request Deletion** - Delete requests and media files (based on permissions)
-- **Media Status Indicators** - Visual status icons including deleted and blacklisted states
+- **Media Status Indicators** - Visual status icons including deleted and blocklisted states
 
 ### Issue Reporting & Management
 - **Permission-Based Access** - Issue functionality controlled by VIEW_ISSUES and CREATE_ISSUES permissions
@@ -83,13 +86,12 @@ SeerrTV is an Android TV application that provides a comprehensive media browsin
   - Local User authentication
   - Plex authentication with PIN code system
   - Jellyfin/Emby authentication (for Jellyseerr and Seerr)
-- **Automatic Server Detection** - Detects Seerr, Overseerr, or Jellyseerr server types automatically
 - **Browser-Based Setup** - QR code or URL-based configuration for easier setup
 - **Manual Wizard** - Step-by-step configuration wizard with guided setup
 - **Cloudflare Protection** - Bypass Cloudflare Access protection with service token authentication
 - **Flexible Configuration** - Supports HTTP/HTTPS with SSL certificate validation
 - **Connection Testing** - Real-time connection validation before proceeding
-- **Multi-user Profiles** - Create multiple local user profiles, each bound to its own API configuration (1:M).
+- **Multi-user Profiles** - Create multiple local user profiles, each bound to its own server configuration, with the account's avatar from Seerr
 - **Profile Selector & PIN (optional)** - If multiple profiles exist (or a single profile is PIN protected), choose a profile at startup and enter an optional numeric PIN before activation.
 
 ### TV-Optimized Interface
@@ -102,10 +104,11 @@ SeerrTV is an Android TV application that provides a comprehensive media browsin
 - **Smart Layout** - Dynamic layout adjustment based on content availability
 - **Persistent Top Bar** - Always-visible top bar with search, settings, clock, and active profile avatar
 - **Settings** - TV-friendly full-screen settings screen (includes `User profiles` management)
+- **Diagnostics** - Settings → Diagnostics lists problems the app recovered from (network, HTTP and parsing errors), redacted of your server address so they can be shared for support
 
 ### Localization & Internationalization
 - **Independent App Language** - User interface language is independent of Discovery Language
-- **Language Selection** - Choose from supported languages (English, German, Spanish, French, Japanese, Dutch, Portuguese, Chinese)
+- **Language Selection** - Choose from supported languages (English, German, Spanish, Estonian, French, Hungarian, Japanese, Dutch, Portuguese, Chinese)
 - **On-the-Fly Language Change** - Switch UI language from the Settings screen without restarting
 - **Automatic Migration** - Existing users automatically use system default language (if supported) or English
 - **Regional Settings** - Default streaming region setting for watch providers and content ratings
@@ -115,7 +118,7 @@ SeerrTV is an Android TV application that provides a comprehensive media browsin
   - Direct integration with Plex for media playback
   - Jellyfin media server support
   - Emby media server support with dual-app compatibility (Android TV and regular Android apps)
-- **Trailer Viewing** - YouTube integration for trailer playback
+- **Trailer Viewing** - Trailers in the YouTube app or an embedded in-app player
 - **Metadata Integration** - TMDb (The Movie Database) integration for ratings, cast, crew, and metadata
 - **Downstream Services**:
   - Sonarr server integration for TV series management
@@ -166,7 +169,7 @@ SeerrTV is an Android TV application that provides a comprehensive media browsin
    - For Plex auth: Visit plex.tv/link and enter the provided PIN
    - For API key: Enter your server's API key
    - For local user: Enter username and password
-5. **Start browsing!** The app will automatically detect your server type (Seerr, Overseerr, or Jellyseerr). If multiple user profiles exist, select one first (and enter an optional PIN).
+5. **Start browsing!** If multiple user profiles exist, select one first (and enter an optional PIN).
 
 For detailed configuration guides, see:
 - [Cloudflare Access Configuration Guide](docs/CLOUDFLARE_CONFIGURATION.md) - Setting up Cloudflare Zero Trust protection
@@ -205,7 +208,7 @@ For detailed configuration guides, see:
 
 ### For Users
 - Android TV device (Android 6.0 / API 23 or higher)
-- Seerr, Overseerr, or Jellyseerr server instance
+- A Seerr server (Jellyseerr and Overseerr also work)
 - Network access to your media server
 
 ### For Developers
@@ -222,20 +225,22 @@ For detailed configuration guides, see:
     - Download from [Adoptium](https://adoptium.net/)
     - Or use [Chocolatey](https://chocolatey.org/): `choco install openjdk21`
   - Verify installation: `java -version` (should show version 21)
-- Android Studio Hedgehog or later
-- Android SDK with API level 25-36
+- A recent Android Studio release that supports Android Gradle Plugin 9.4
+- Android SDK Platform 37 (the app targets API 37 and supports API 23+)
 - Android TV emulator or physical device for testing
 
 ## Technologies Used
 
-- **UI Framework**: Jetpack Compose for modern, declarative UI
-- **Dependency Injection**: Hilt for clean architecture
-- **Image Loading**: Coil for efficient image caching and loading
-- **Asynchronous Operations**: Coroutines and Flow for reactive programming
-- **Navigation**: Jetpack Navigation with custom transitions
-- **Data Storage**: SharedPreferences for configuration
-- **HTTP Client**: Ktor for API communication
-- **Platform**: Android TV SDK for TV-specific features
+- **Language**: Kotlin 2.4
+- **UI Framework**: Jetpack Compose (Material 3)
+- **Dependency Injection**: Hilt
+- **Image Loading**: Coil 3
+- **Asynchronous Operations**: Coroutines and Flow
+- **Navigation**: Navigation Compose (held on 2.9.x while `minSdk` is 23)
+- **HTTP Client**: Ktor with the OkHttp engine, kotlinx.serialization
+- **Data Storage**: SharedPreferences for configuration and profiles
+- **Release Builds**: R8 shrinking/obfuscation plus a baseline profile for faster cold starts
+- **Static Analysis**: detekt and Android lint
 
 ## Development Setup
 
@@ -379,6 +384,26 @@ For release builds, you need to configure APK signing:
 
 For detailed signing setup instructions, see [Signing Setup Guide](docs/SIGNING_SETUP.md).
 
+#### Tests & Verification
+
+```bash
+./gradlew :tv:testDirectAppDebugUnitTest   # JVM unit tests, incl. API contract tests against JSON fixtures
+./gradlew detekt                            # Static analysis (config/detekt/detekt.yml)
+./gradlew :tv:verifyR8Output                # Checks the R8 release output kept serializers, JS bridge and line numbers
+```
+
+`verifyR8Output` also runs automatically after `bundlePlayRelease`.
+
+#### Baseline profile
+
+Release builds ship a baseline profile recorded from SeerrTV's own cold start, committed under `tv/src/main/generated/baselineProfiles/`. Regenerate it when the startup path changes meaningfully, against a booted Android TV emulator or a connected TV device (Gradle Managed Devices can't be used, as they reject TV images):
+
+```bash
+./gradlew :tv:generateBaselineProfile
+```
+
+With more than one device attached, set `ANDROID_SERIAL` to pick the TV.
+
 #### Configuration Files
 
 **Browser Configuration**: The browser-based configuration endpoint can be customized by creating a `browser-config.properties` file:
@@ -387,7 +412,7 @@ For detailed signing setup instructions, see [Signing Setup Guide](docs/SIGNING_
 - Default value points to `https://seerrtv.devmesh.ca`
 - This file is gitignored for security
 
-**Release:** Play Store → `./gradlew bundlePlayRelease`, upload the `.aab` to Play Console. Direct → `./gradlew assembleDirectRelease`, upload `SeerrTV-vX.Y.Z.apk` and `SeerrTV-vX.Y.Z.launcher.apk` to a GitHub Release (tag e.g. `v0.26.4`). The app checks GitHub Releases for updates.
+**Release:** Play Store → `./gradlew bundlePlayRelease`, upload the `.aab` to Play Console. Direct → `./gradlew assembleDirectRelease`, upload `SeerrTV-vX.Y.Z.apk` and `SeerrTV-vX.Y.Z.launcher.apk` to a GitHub Release (tag e.g. `v0.32.0`). The app checks GitHub Releases for updates.
 
 ## App Configuration
 
@@ -610,7 +635,11 @@ A: Use your TV remote D-pad:
 
 **Q: Can I use this with Overseerr/Jellyseerr/Seerr?**
 
-A: Yes! SeerrTV automatically detects and works with all three server types: Overseerr, Jellyseerr, and Seerr. The app will detect your server type during initial configuration.
+A: Yes. Seerr is the primary target; Jellyseerr and Overseerr continue to work, with some features (such as the blocklist) only available where the server supports them. See [Backend Support](docs/SEERR_BACKEND_SUPPORT.md).
+
+**Q: A title is hidden in SeerrTV but I can see it on the web (or vice versa). Why?**
+
+A: SeerrTV applies the server's blocklist and "Hide Available Items" settings per user, the same way the Seerr web app does. If you connect with an API key you are signed in as the admin, who can see blocklisted titles; sign in with a per-user login (Local, Plex or Jellyfin/Emby) to get that user's view.
 
 **Q: Does SeerrTV support 4K requests?**
 
@@ -625,7 +654,7 @@ A:
 2. If not, create a new issue using our [bug report template](.github/ISSUE_TEMPLATE/bug_report.md)
 3. Include as much information as possible: app version, device model, Android version, steps to reproduce
 4. For D-pad navigation issues, include the exact navigation path
-5. If possible, attach logs captured using the [Support Logs Guide](docs/HOWTO_SupportLogs.md)
+5. Include a photo of the relevant entry from **Settings → Diagnostics**, or logs captured using the [Support Logs Guide](docs/HOWTO_SupportLogs.md)
 
 **Q: How do I request a new feature?**
 

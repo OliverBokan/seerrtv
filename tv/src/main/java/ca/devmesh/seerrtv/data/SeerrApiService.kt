@@ -77,10 +77,13 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.X509TrustManager
 import kotlin.math.min
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.json.Json
@@ -1559,11 +1562,17 @@ class SeerrApiService @Inject constructor(
         }
     }
 
-    private inline fun <reified T> handleApiException(
+    private suspend inline fun <reified T> handleApiException(
         e: Exception,
         fullUrl: String,
         method: HttpMethod
     ): ApiResult<T> {
+        // A cancelled caller (screen left, row scrolled away) is not a failed request: rethrow so
+        // the coroutine finishes cancelling, rather than recording "Job was cancelled" in
+        // Diagnostics and handing back an ApiResult.Error the caller may render or cache. Checked
+        // against our own job, not `e is CancellationException`: Ktor also throws one when
+        // refreshHttpClient closes the client mid-request, and that one is a real failure.
+        currentCoroutineContext().ensureActive()
         Log.e("SeerrApiService", "API Error for $method $fullUrl", e)
         DiagnosticsLog.recordThrowable(
             context = context,
@@ -2475,6 +2484,10 @@ class SeerrApiService @Inject constructor(
                 }
                 is ApiResult.Loading -> { /* Handle loading state if needed */ }
             }
+        } catch (e: CancellationException) {
+            // Cancelled, not failed: leave the cache (restored at startup or previously loaded)
+            // as it was instead of replacing it with an empty error entry.
+            throw e
         } catch (e: Exception) {
             Log.e("SeerrApiService", "Error loading Radarr configuration", e)
             cachedRadarrData = RadarrServerInfo(
@@ -2523,6 +2536,10 @@ class SeerrApiService @Inject constructor(
                 }
                 is ApiResult.Loading -> { /* Handle loading state if needed */ }
             }
+        } catch (e: CancellationException) {
+            // Cancelled, not failed: leave the cache (restored at startup or previously loaded)
+            // as it was instead of replacing it with an empty error entry.
+            throw e
         } catch (e: Exception) {
             Log.e("SeerrApiService", "Error loading Sonarr configuration", e)
             cachedSonarrData = SonarrServerInfo(

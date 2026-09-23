@@ -434,6 +434,7 @@
     <!-- Browse Screen Strings -->
     <string name="browse_movies">Filmid</string>
     <string name="browse_series">Sarjad</string>
+    <string name="topBar_profiles">Profiilid</string>
     <string name="browse_noResults">Tulemusi ei leitud</string>
     
     <!-- Sort Menu Strings -->

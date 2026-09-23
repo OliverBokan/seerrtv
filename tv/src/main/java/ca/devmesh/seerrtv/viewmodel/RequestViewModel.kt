@@ -216,11 +216,10 @@ class RequestViewModel @Inject constructor(
     }
 
     private fun buildDefaultRequest(mediaDetails: ca.devmesh.seerrtv.model.MediaDetails, is4kRequest: Boolean): Map<String, Any?> {
-        val request = mutableMapOf(
+        val request = mutableMapOf<String, Any?>(
             "mediaId" to mediaDetails.id,
             "mediaType" to mediaDetails.mediaType.toString().lowercase(),
-            "is4k" to is4kRequest,
-            "tags" to emptyList<String>()
+            "is4k" to is4kRequest
         )
 
         // Only include userId when using API key authentication
@@ -312,7 +311,7 @@ class RequestViewModel @Inject constructor(
                     rootFolder = request["rootFolder"] as? String,
                     languageProfileId = request["languageProfileId"] as? Int,
                     userId = request["userId"] as? Int,
-                    tags = (request["tags"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
+                    tags = (request["tags"] as? List<*>)?.mapNotNull { it as? Int }?.takeIf { it.isNotEmpty() }
                 )
                 val response = apiService.requestMedia(requestBody)
                 when (response) {

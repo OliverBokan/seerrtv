@@ -455,6 +455,7 @@
     <!-- Browse Screen Strings -->
     <string name="browse_movies">Movies</string>
     <string name="browse_series">Series</string>
+    <string name="topBar_profiles">Profiles</string>
     <string name="browse_noResults">No results found</string>
     
     <!-- Sort Menu Strings -->

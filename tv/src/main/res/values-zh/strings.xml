@@ -381,6 +381,7 @@
     <!-- Browse Screen Strings -->
     <string name="browse_movies">电影</string>
     <string name="browse_series">剧集</string>
+    <string name="topBar_profiles">用户资料</string>
     <string name="browse_noResults">未找到结果</string>
     
     <!-- Sort Menu Strings -->
