@@ -325,7 +325,7 @@
   - 102 for `MediaCardKt`, 142 for `EnhancedMediaCarouselKt` and 84 for `CarouselComponentsKt`;
   - 224 for `MediaDetailsKt`, 199 for `MediaBrowseScreenKt` and 47 for `DiscoveryGridKt`.
 
-  The previous profile had none of these. The startup profile is now separate (28,079 rules). The run was pinned to the emulator with `ANDROID_SERIAL`; the attached phone was untouched. Profiles take effect only in release builds, so the debug-build measurements in `tools/perf` do not show this change. A release comparison (`tools/perf/release_compare.py`: `benchmarkRelease` with `speed-profile`, 0.33.0 against 0.34.0, 3 alternating rounds) measured home showing media cards 13.1 s → 6.7 s after launch, and D-pad scroll p90 / p99 frames 21 / 27 ms → 19 / 23 ms. That covers all of 0.34.0's changes together, not the profile on its own.
+  The previous profile had none of these. The startup profile is now separate (28,079 rules). The run was pinned to the emulator with `ANDROID_SERIAL`; the attached phone was untouched. Profiles take effect only in release builds, so the debug-build measurements in `tools/perf` do not show this change. A release comparison (`tools/perf/release_compare.py`: `benchmarkRelease` with `speed-profile`, the build before this release's performance work against 0.34.0, 3 alternating rounds) measured home showing media cards 13.1 s → 6.7 s after launch, and D-pad scroll p90 / p99 frames 21 / 27 ms → 19 / 23 ms. That covers all of 0.34.0's changes together, not the profile on its own.
 
 ### Improved: Large debug dumps no longer run in release builds
 
@@ -334,14 +334,6 @@
 - **Fix** – These five logs in `SeerrViewModel` and `SeerrApiService` are behind `BuildConfig.DEBUG`. Since the `DEBUG` fix above, release builds compile them out.
 
 - **Verified** – Both build types compile.
-
-### Changed: Dependency updates
-
-- Removed `androidx.tv:tv-foundation` 1.0.0. Nothing in the app used it.
-
-No other dependency versions changed.
-
-## 0.33.0
 
 ### Fixed: A cancelled request could show up as "Error loading media"
 
@@ -376,6 +368,14 @@ No other dependency versions changed.
 ### Changed: README
 
 - The README now names [Seerr](https://github.com/seerr-team/seerr) as the primary backend, with Jellyseerr and Overseerr as legacy servers, and lists features added since it was last updated: server-driven home rows, Similar titles, blocklist and "Hide Available Items" support, watchlist, and root folder selection for movie requests.
+- A new FAQ entry explains that turning on gzip or Brotli compression in a reverse proxy in front of Seerr speeds SeerrTV up over slow or remote connections.
+- The signing setup in the README and `docs/SIGNING_SETUP.md` uses a generic example keystore path.
+
+### Changed: Dependency updates
+
+- Removed `androidx.tv:tv-foundation` 1.0.0. Nothing in the app used it.
+
+No other dependency versions changed.
 
 ## 0.32.0
 
