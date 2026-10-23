@@ -84,6 +84,8 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.json.Json
@@ -127,7 +129,10 @@ sealed class ApiResult<out T> {
         val exception: Exception, 
         val statusCode: Int? = null
     ) : ApiResult<Nothing>()
-    class Loading : ApiResult<Nothing>()
+    // An object, not a class: a new instance per use never compared equal, so every
+    // recomposition that built one restarted effects keyed on it (e.g. CarouselSection's
+    // LaunchedEffect(apiResult), which triggers load-more).
+    data object Loading : ApiResult<Nothing>()
 }
 
 data class PaginationInfo(
@@ -240,6 +245,9 @@ class SeerrApiService @Inject constructor(
         const val MIN_VISIBLE_RESULTS_PER_LOAD = 12
         /** Upper bound on server round-trips for a single paged load. */
         const val MAX_PAGES_PER_LOAD = 5
+        val DUPLICATE_SLASHES = Regex("([^:])//+")
+        /** How long one /settings/public response is shared (see [getPublicSettings]). */
+        const val PUBLIC_SETTINGS_TTL_MS = 30_000L
         const val COOKIE_CONNECT_SID = "connect.sid"
         const val COOKIE_CSRF = "_csrf"
         const val COOKIE_XSRF = "XSRF-TOKEN"
@@ -393,12 +401,32 @@ class SeerrApiService @Inject constructor(
         )
     }
 
+    // /settings/public is read at startup for the media-server type and for the content
+    // visibility flags, from three places within a few seconds. One response is shared for a
+    // short while; it is dropped whenever the server configuration changes.
+    private var publicSettingsCache: Pair<Long, PublicSettingsResponse>? = null
+    private val publicSettingsLock = Mutex()
+
+    private suspend fun getPublicSettings(): ApiResult<PublicSettingsResponse> {
+        publicSettingsLock.lock()
+        try {
+            publicSettingsCache
+                ?.takeIf { System.currentTimeMillis() - it.first < PUBLIC_SETTINGS_TTL_MS }
+                ?.let { return ApiResult.Success(it.second) }
+            val result = executeApiCall<PublicSettingsResponse>("settings/public")
+            if (result is ApiResult.Success) publicSettingsCache = System.currentTimeMillis() to result.data
+            return result
+        } finally {
+            publicSettingsLock.unlock()
+        }
+    }
+
     /**
      * Refreshes the cached public settings. Called after a successful authentication; failures are
      * non-fatal and simply keep the last known (or default: hide nothing) values.
      */
     suspend fun refreshContentVisibilitySettings() {
-        when (val result = executeApiCall<PublicSettingsResponse>("settings/public")) {
+        when (val result = getPublicSettings()) {
             is ApiResult.Success -> {
                 val data = result.data
                 serverHideAvailable = data.hideAvailable ?: false
@@ -523,10 +551,19 @@ class SeerrApiService @Inject constructor(
     fun getCurrentUserInfo(): UserInfo? = currentUserInfoState
 
     /** Site origin for Seerr (no `/api/v1` suffix); used for `/avatarproxy/...` paths. */
+    // The image interceptor asks for the origin on every image request, TMDB ones included, so
+    // it is computed once per config (updateConfig replaces the config object).
+    @Volatile
+    private var seerrOriginCache: Pair<SeerrConfig, String>? = null
+
     fun getSeerrOrigin(): String {
-        val protocol = SharedPreferencesUtil.sanitizeProtocolForApi(config.protocol)
-        val hostname = SharedPreferencesUtil.sanitizeHostnameForApi(config.hostname, stripPort = false)
-        return "$protocol://$hostname".replace(Regex("([^:])//+"), "$1/")
+        val current = config
+        seerrOriginCache?.let { (cachedConfig, origin) -> if (cachedConfig === current) return origin }
+        val protocol = SharedPreferencesUtil.sanitizeProtocolForApi(current.protocol)
+        val hostname = SharedPreferencesUtil.sanitizeHostnameForApi(current.hostname, stripPort = false)
+        val origin = "$protocol://$hostname".replace(DUPLICATE_SLASHES, "$1/")
+        seerrOriginCache = current to origin
+        return origin
     }
 
     fun resolveAvatarImageUrl(avatar: String?): String? {
@@ -874,8 +911,8 @@ class SeerrApiService @Inject constructor(
     private val networkIds = listOf(213, 2739, 1024, 2552, 453, 49, 4353, 2, 19, 359, 174, 67, 318, 71, 6, 16, 4330, 4, 56, 80, 13, 3353)
     
     // Cache for studios and networks data
-    private val cachedStudios = mutableMapOf<Int, StudioResponse>()
-    private val cachedNetworks = mutableMapOf<Int, NetworkResponse>()
+    private val cachedStudios = java.util.concurrent.ConcurrentHashMap<Int, StudioResponse>()
+    private val cachedNetworks = java.util.concurrent.ConcurrentHashMap<Int, NetworkResponse>()
 
     private var mediaServerType: MediaServerType = MediaServerType.NOT_CONFIGURED
 
@@ -903,7 +940,9 @@ class SeerrApiService @Inject constructor(
             .dns(Dns.SYSTEM)
             .sslSocketFactory(TrustAllCerts.createSSLSocketFactory()!!, TrustAllCerts.trustAllCerts[0])
             .hostnameVerifier { _, _ -> true }
-            .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            // Connecting takes well under a second when the server is up; 10 s is still generous
+            // for a tunnel, and a server that is down no longer holds each splash step for 30 s.
+            .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
             .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
             // Fix connection pool issues that cause "Max send count exceeded" errors
@@ -912,7 +951,9 @@ class SeerrApiService @Inject constructor(
             // Ktor's OkHttp engine enqueues its calls, so a non-IOException escaping the call
             // (e.g. HttpUrl.Builder.host rejecting a host at connection time) is rethrown by
             // AsyncCall.run onto a dispatcher thread and kills the process. See
-            // [resilientDispatchExecutor]. Request limits stay at OkHttp's defaults.
+            // [resilientDispatchExecutor]. Up to 8 requests per host (OkHttp's default is 5): the
+            // home rows load during the splash, and with 5 the splash's own Sonarr/Radarr calls
+            // queued behind them. Card details stay capped at 4 of those (CARD_DETAILS_CONCURRENCY).
             .dispatcher(
                 okhttp3.Dispatcher(
                     resilientDispatchExecutor(
@@ -922,7 +963,7 @@ class SeerrApiService @Inject constructor(
                         diagnosticsContext = "A server request failed on a network thread. " +
                             "The request was abandoned; the app kept running."
                     )
-                )
+                ).apply { maxRequestsPerHost = 8 }
             )
             .build()
         return HttpClient(OkHttp) {
@@ -933,7 +974,7 @@ class SeerrApiService @Inject constructor(
                 json(json)
             }
             install(io.ktor.client.plugins.HttpTimeout) {
-                connectTimeoutMillis = 30000
+                connectTimeoutMillis = 10000
                 requestTimeoutMillis = 30000
                 socketTimeoutMillis = 30000
             }
@@ -1023,7 +1064,7 @@ class SeerrApiService @Inject constructor(
                 val now = Instant.now()
                 if (now.isAfter(currentAuthToken!!.expiresAt.minus(1, ChronoUnit.HOURS))) {
                     Log.d("SeerrApiService", "Auth token is about to expire, refreshing...")
-                    when (val loginResult = login()) {
+                    when (val loginResult = refreshSessionOnce(generationSeen = sessionGeneration)) {
                         is ApiResult.Success -> {
                             Log.d("SeerrApiService", "Token refreshed successfully")
                         }
@@ -1048,6 +1089,9 @@ class SeerrApiService @Inject constructor(
                 }
             }
 
+            // A 401 below re-signs in only if no other request has signed in since this one was
+            // sent (see refreshSessionOnce).
+            val generationAtRequest = sessionGeneration
             val requestUrl = if (raw) endpoint else "$apiUrl/$endpoint"
             val response: HttpResponse = client.request {
                 url {
@@ -1149,11 +1193,8 @@ class SeerrApiService @Inject constructor(
                         
                         Log.d("SeerrApiService", "Authentication error detected, attempting token refresh and retry...")
                         
-                        // Clear the current token to force a fresh login
-                        currentAuthToken = null
-                        
-                        // Attempt to refresh the token
-                        when (val loginResult = login()) {
+                        // Sign in again (shared with any other request that hit the same expiry)
+                        when (val loginResult = refreshSessionOnce(generationSeen = generationAtRequest)) {
                             is ApiResult.Success -> {
                                 Log.d("SeerrApiService", "Token refreshed successfully, retrying request...")
                                 // Retry the request with the new token using the non-inline function
@@ -1374,6 +1415,27 @@ class SeerrApiService @Inject constructor(
             errorBody.contains("authentication", ignoreCase = true) ||
             errorBody.contains("login", ignoreCase = true)
     }
+
+    private val sessionRefreshLock = Mutex()
+
+    // Bumped after every successful sign-in in refreshSessionOnce. The token object itself can't
+    // tell callers apart: mergeCookiesFromSeerrResponse replaces it whenever a response (even the
+    // 401) sets a session or CSRF cookie.
+    @Volatile
+    private var sessionGeneration = 0
+
+    /**
+     * Signs in again for a request whose session expired or was rejected. Home rows load in
+     * parallel, so a dozen requests can meet the same expired session at once; before this each
+     * of them ran its own login. [generationSeen] is [sessionGeneration] when the caller's request
+     * was sent: if a sign-in has completed since, that session is reused instead of signing in again.
+     */
+    private suspend fun refreshSessionOnce(generationSeen: Int): ApiResult<Unit> =
+        sessionRefreshLock.withLock {
+            if (currentAuthToken != null && sessionGeneration != generationSeen) return@withLock ApiResult.Success(Unit)
+            currentAuthToken = null
+            login().also { if (it is ApiResult.Success) sessionGeneration++ }
+        }
 
     private suspend fun login(): ApiResult<Unit> {
         Log.d("SeerrApiService", "🔄 Starting login process...")
@@ -1614,11 +1676,17 @@ class SeerrApiService @Inject constructor(
         return fetchSinglePage(endpoint).mapData { it.results }
     }
 
+    // Upcoming rows paginate under their full query, so that is the key to reset. Resetting
+    // "discover/movies" / "discover/tv" left Upcoming on its next page and rewound Popular.
+    fun upcomingMoviesEndpoint(): String = "discover/movies?primaryReleaseDateGte=${isoToday()}"
+    fun upcomingSeriesEndpoint(): String = "discover/tv?firstAirDateGte=${isoToday()}"
+    private fun isoToday(): String =
+        java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE)
+
     suspend fun getUpcomingMovies(reset: Boolean = false): ApiResult<List<Media>> {
-        val endpoint = "discover/movies"
+        val endpoint = upcomingMoviesEndpoint()
         if (reset) resetPaginationState(endpoint)
-        val today = java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE)
-        return fetchSinglePage("$endpoint?primaryReleaseDateGte=$today").mapData { it.results }
+        return fetchSinglePage(endpoint).mapData { it.results }
     }
 
     suspend fun getPopularSeries(reset: Boolean = false): ApiResult<List<Media>> {
@@ -1628,10 +1696,9 @@ class SeerrApiService @Inject constructor(
     }
 
     suspend fun getUpcomingSeries(reset: Boolean = false): ApiResult<List<Media>> {
-        val endpoint = "discover/tv"
+        val endpoint = upcomingSeriesEndpoint()
         if (reset) resetPaginationState(endpoint)
-        val today = java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE)
-        return fetchSinglePage("$endpoint?firstAirDateGte=$today").mapData { it.results }
+        return fetchSinglePage(endpoint).mapData { it.results }
     }
 
     /**
@@ -1989,7 +2056,7 @@ class SeerrApiService @Inject constructor(
                         )
                     )
                     is ApiResult.Error -> ApiResult.Error(combinedResult.exception, combinedResult.statusCode)
-                    is ApiResult.Loading -> ApiResult.Loading()
+                    is ApiResult.Loading -> ApiResult.Loading
                 }
             }
             "ratings" -> {
@@ -2011,13 +2078,13 @@ class SeerrApiService @Inject constructor(
                         )
                     )
                     is ApiResult.Error -> ApiResult.Error(flatResult.exception, flatResult.statusCode)
-                    is ApiResult.Loading -> ApiResult.Loading()
+                    is ApiResult.Loading -> ApiResult.Loading
                 }
             }
             else -> ApiResult.Error(Exception("Unknown endpoint: $ratingsEndpoint"))
         }
         
-        Log.d("SeerrApiService", "Ratings API response: $result")
+        if (BuildConfig.DEBUG) Log.d("SeerrApiService", "Ratings API response: $result")
         return result
     }
 
@@ -2398,6 +2465,7 @@ class SeerrApiService @Inject constructor(
     }
 
     fun updateConfig(newConfig: SeerrConfig) {
+        publicSettingsCache = null
         Log.d("SeerrApiService", "Updating API Service configuration:")
         Log.d("SeerrApiService", "- Protocol: ${newConfig.protocol}")
         Log.d("SeerrApiService", "- Hostname: ${newConfig.hostname}")
@@ -2455,18 +2523,22 @@ class SeerrApiService @Inject constructor(
                     val allRadarrs = radarrResults.data
                     Log.d("SeerrApiService", "Found ${allRadarrs.size} Radarr servers")
                     val defaultRadarr = allRadarrs.find { it.isDefault }
-                    val fullRadarrList = allRadarrs.mapNotNull { radarr ->
-                        when (val radarrDetails = getRadarr(radarr.id)) {
-                            is ApiResult.Success -> {
-                                radarrDetails.data
+                    // Each server's details in parallel (they used to load one at a time);
+                    // awaitAll keeps the server order.
+                    val fullRadarrList = allRadarrs.map { radarr ->
+                        async {
+                            when (val radarrDetails = getRadarr(radarr.id)) {
+                                is ApiResult.Success -> {
+                                    radarrDetails.data
+                                }
+                                is ApiResult.Error -> {
+                                    Log.e("SeerrApiService", "Failed to load Radarr details for server ${radarr.id}: ${radarrDetails.exception.message}")
+                                    null
+                                }
+                                is ApiResult.Loading -> null
                             }
-                            is ApiResult.Error -> {
-                                Log.e("SeerrApiService", "Failed to load Radarr details for server ${radarr.id}: ${radarrDetails.exception.message}")
-                                null
-                            }
-                            is ApiResult.Loading -> null
                         }
-                    }
+                    }.awaitAll().filterNotNull()
                     val defaultRadarrDetails = fullRadarrList.find { it.server.id == defaultRadarr?.id }
                     cachedRadarrData = RadarrServerInfo(
                         allServers = fullRadarrList,
@@ -2507,18 +2579,22 @@ class SeerrApiService @Inject constructor(
                     val allSonarrs = sonarrResults.data
                     Log.d("SeerrApiService", "Found ${allSonarrs.size} Sonarr servers")
                     val defaultSonarr = allSonarrs.find { it.isDefault }
-                    val fullSonarrList = allSonarrs.mapNotNull { sonarr ->
-                        when (val sonarrDetails = getSonarr(sonarr.id)) {
-                            is ApiResult.Success -> {
-                                sonarrDetails.data
+                    // Each server's details in parallel (they used to load one at a time);
+                    // awaitAll keeps the server order.
+                    val fullSonarrList = allSonarrs.map { sonarr ->
+                        async {
+                            when (val sonarrDetails = getSonarr(sonarr.id)) {
+                                is ApiResult.Success -> {
+                                    sonarrDetails.data
+                                }
+                                is ApiResult.Error -> {
+                                    Log.e("SeerrApiService", "Failed to load Sonarr details for server ${sonarr.id}: ${sonarrDetails.exception.message}")
+                                    null
+                                }
+                                is ApiResult.Loading -> null
                             }
-                            is ApiResult.Error -> {
-                                Log.e("SeerrApiService", "Failed to load Sonarr details for server ${sonarr.id}: ${sonarrDetails.exception.message}")
-                                null
-                            }
-                            is ApiResult.Loading -> null
                         }
-                    }
+                    }.awaitAll().filterNotNull()
                     val defaultSonarrDetails = fullSonarrList.find { it.server.id == defaultSonarr?.id }
                     cachedSonarrData = SonarrServerInfo(
                         allServers = fullSonarrList,
@@ -2880,7 +2956,7 @@ class SeerrApiService @Inject constructor(
                 }
 
                 is ApiResult.Loading -> {
-                    return ApiResult.Loading()
+                    return ApiResult.Loading
                 }
             }
         }
@@ -2975,7 +3051,7 @@ class SeerrApiService @Inject constructor(
                 }
 
                 is ApiResult.Loading -> {
-                    return ApiResult.Loading()
+                    return ApiResult.Loading
                 }
             }
         }
@@ -3093,26 +3169,21 @@ class SeerrApiService @Inject constructor(
         val endIndex = min(startIndex + pageSize, studioIds.size)
         val pageIds = studioIds.subList(startIndex, endIndex)
         
-        // Fetch each studio's details (using cache when available)
-        val pageStudios = mutableListOf<StudioResponse>()
-        for (id in pageIds) {
-            val cachedStudio = cachedStudios[id]
-            if (cachedStudio != null) {
-                pageStudios.add(cachedStudio)
-            } else {
-                when (val result = getStudioDetails(id)) {
-                    is ApiResult.Success -> {
-                        cachedStudios[id] = result.data
-                        pageStudios.add(result.data)
+        // Fetch the page's studio details (using cache when available), in parallel; they used
+        // to load one after another. awaitAll keeps the page order; failures are skipped.
+        val pageStudios = coroutineScope {
+            pageIds.map { id ->
+                async {
+                    cachedStudios[id] ?: when (val result = getStudioDetails(id)) {
+                        is ApiResult.Success -> result.data.also { cachedStudios[id] = it }
+                        is ApiResult.Error -> {
+                            Log.e("SeerrApiService", "Failed to fetch studio with ID $id: ${result.exception.message}")
+                            null
+                        }
+                        is ApiResult.Loading -> null
                     }
-                    is ApiResult.Error -> {
-                        Log.e("SeerrApiService", "Failed to fetch studio with ID $id: ${result.exception.message}")
-                        // Continue with the next ID instead of failing the whole request
-                        continue
-                    }
-                    is ApiResult.Loading -> continue
                 }
-            }
+            }.awaitAll().filterNotNull()
         }
         
         // Update pagination state
@@ -3181,46 +3252,21 @@ class SeerrApiService @Inject constructor(
         val endIndex = min(startIndex + pageSize, networkIds.size)
         val pageIds = networkIds.subList(startIndex, endIndex)
         
-        // Track active network fetch requests to prevent duplicate calls
-        val activeRequests = mutableMapOf<Int, ApiResult<NetworkResponse>>()
-        
-        // Fetch each network's details (using cache when available)
-        val pageNetworks = mutableListOf<NetworkResponse>()
-        for (id in pageIds) {
-            // Check if this network is already in cache
-            val cachedNetwork = cachedNetworks[id]
-            if (cachedNetwork != null) {
-                pageNetworks.add(cachedNetwork)
-                continue
-            }
-            
-            // Prevent duplicate API calls for the same network ID
-            val result = if (id in activeRequests) {
-                if (BuildConfig.DEBUG) {
-                    Log.d("SeerrApiService", "Reusing existing request for network ID $id")
+        // Fetch the page's network details (using cache when available), in parallel; they used
+        // to load one after another. awaitAll keeps the page order; failures are skipped.
+        val pageNetworks = coroutineScope {
+            pageIds.map { id ->
+                async {
+                    cachedNetworks[id] ?: when (val result = getNetworkDetails(id)) {
+                        is ApiResult.Success -> result.data.also { cachedNetworks[id] = it }
+                        is ApiResult.Error -> {
+                            Log.e("SeerrApiService", "Failed to fetch network with ID $id: ${result.exception.message}")
+                            null
+                        }
+                        is ApiResult.Loading -> null
+                    }
                 }
-                activeRequests[id]!!
-            } else {
-                if (BuildConfig.DEBUG) {
-                    Log.d("SeerrApiService", "Fetching details for network ID $id")
-                }
-                val fetchResult = getNetworkDetails(id)
-                activeRequests[id] = fetchResult
-                fetchResult
-            }
-            
-            when (result) {
-                is ApiResult.Success -> {
-                    cachedNetworks[id] = result.data
-                    pageNetworks.add(result.data)
-                }
-                is ApiResult.Error -> {
-                    Log.e("SeerrApiService", "Failed to fetch network with ID $id: ${result.exception.message}")
-                    // Continue with the next ID instead of failing the whole request
-                    continue
-                }
-                is ApiResult.Loading -> continue
-            }
+            }.awaitAll().filterNotNull()
         }
         
         // Update pagination state
@@ -3465,7 +3511,7 @@ class SeerrApiService @Inject constructor(
         when (serverType) {
             ServerType.JELLYSEERR -> {
                 Log.d("SeerrApiService", "Jellyseerr detected, checking /settings/public...")
-                when (val result = executeApiCall<PublicSettingsResponse>("settings/public")) {
+                when (val result = getPublicSettings()) {
                     is ApiResult.Success -> {
                         val type = when (result.data.mediaServerType) {
                             1 -> {
@@ -3505,7 +3551,7 @@ class SeerrApiService @Inject constructor(
             }
             ServerType.SEERR -> {
                 Log.d("SeerrApiService", "Seerr detected, checking /settings/public...")
-                when (val result = executeApiCall<PublicSettingsResponse>("settings/public")) {
+                when (val result = getPublicSettings()) {
                     is ApiResult.Success -> {
                         val type = when (result.data.mediaServerType) {
                             1 -> {
@@ -3736,6 +3782,10 @@ class SeerrApiService @Inject constructor(
         val keywordValue = filters.keywords.joinToString(",")
         params.add("keywords=${keywordValue.encodeForOverseerr()}")
     }
+    if (filters.excludeKeywords.isNotEmpty()) {
+        val excludeValue = filters.excludeKeywords.joinToString(",")
+        params.add("excludeKeywords=${excludeValue.encodeForOverseerr()}")
+    }
     
     // Add original language filter — bare ISO 639-1 code, e.g. `language=ja`.
     // The server passes this straight through as TMDB's with_original_language.
@@ -3892,6 +3942,10 @@ class SeerrApiService @Inject constructor(
         val encodedQuery = query.encodeForOverseerr()
         return executeApiCall<PaginatedResponse<Keyword>>("search/keyword?query=$encodedQuery").mapData { it.results }
     }
+
+    /** Single keyword by TMDB id — used to label selected keyword filters that aren't in the current search results. */
+    suspend fun getKeyword(keywordId: Int): ApiResult<Keyword> =
+        executeApiCall<Keyword>("keyword/$keywordId")
 
     /**
      * Search for studios/companies.

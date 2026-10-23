@@ -44,13 +44,9 @@ fun DiscoveryGrid(
     imageLoader: ImageLoader,
     context: Context
 ) {
-    // Track current selection from GridPositionManager
-    val currentSelection = remember { mutableStateOf(Pair(selectedRow, selectedColumn)) }
-    
-    // Update currentSelection whenever selectedRow or selectedColumn changes
-    LaunchedEffect(selectedRow, selectedColumn) {
-        currentSelection.value = Pair(selectedRow, selectedColumn)
-    }
+    // Cells compare against selectedRow/selectedColumn directly. They used to be copied into
+    // local state by a LaunchedEffect, which put the highlight one frame behind each D-pad press.
+    val resultKeys = remember(results) { uniqueLazyKeys(results) { "${it.javaClass.simpleName}_${it.id}" } }
     
     // Handle end reached for infinite scroll - monitor scroll position
     // Use a more reliable approach that checks both visible items and scroll position
@@ -95,15 +91,13 @@ fun DiscoveryGrid(
             ),
             modifier = Modifier.fillMaxHeight()
         ) {
-            items(results.size) { index ->
+            items(results.size, key = { index -> resultKeys[index] }) { index ->
                 val result = results[index]
                 val row = index / numberOfColumns
                 val column = index % numberOfColumns
-                val isItemSelected = remember(currentSelection.value, focusedItem) {
-                    focusedItem == FocusedItem.Grid &&
-                            row == currentSelection.value.first &&
-                            column == currentSelection.value.second
-                }
+                val isItemSelected = focusedItem == FocusedItem.Grid &&
+                        row == selectedRow &&
+                        column == selectedColumn
                 MediaItem(
                     result = result,
                     imageLoader = imageLoader,

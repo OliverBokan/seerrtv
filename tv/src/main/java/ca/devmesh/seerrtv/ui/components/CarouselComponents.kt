@@ -27,6 +27,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import ca.devmesh.seerrtv.R
+import ca.devmesh.seerrtv.model.CastMember
+import ca.devmesh.seerrtv.model.CrewMember
 import ca.devmesh.seerrtv.model.Keyword
 import ca.devmesh.seerrtv.model.Media
 import ca.devmesh.seerrtv.model.SimilarMediaItem
@@ -159,13 +161,23 @@ fun PersonCarousel(
         listState.animateScrollToItem(selectedIndex)
     }
 
+    val personKeys = remember(people) {
+        uniqueLazyKeys(people) { person ->
+            when (person) {
+                is CastMember -> "cast_${person.id}"
+                is CrewMember -> "crew_${person.id}"
+                else -> "p_${person.hashCode()}"
+            }
+        }
+    }
+
     Column(modifier = Modifier.fillMaxWidth()) {
         LazyRow(
             state = listState,
             contentPadding = PaddingValues(end = 16.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
-            itemsIndexed(people) { index, person ->
+            itemsIndexed(people, key = { index, _ -> personKeys[index] }) { index, person ->
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier
@@ -246,12 +258,14 @@ fun SimilarMediaCarousel(
         }
     }
 
+    val similarKeys = remember(similarMedia) { uniqueLazyKeys(similarMedia) { "${it.mediaType}_${it.id}" } }
+
     LazyRow(
         state = listState,
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
-        itemsIndexed(similarMedia) { index, media ->
+        itemsIndexed(similarMedia, key = { index, _ -> similarKeys[index] }) { index, media ->
             SimilarMediaCard(
                 media = media,
                 imageLoader = imageLoader,

@@ -50,6 +50,7 @@ import ca.devmesh.seerrtv.ui.focus.AppFocusState
 import ca.devmesh.seerrtv.ui.focus.TopBarFocus
 import ca.devmesh.seerrtv.ui.focus.DetailsFocusState
 import ca.devmesh.seerrtv.ui.focus.createMediaDetailsDpadConfig
+import ca.devmesh.seerrtv.ui.focus.rememberStableDpadConfig
 import ca.devmesh.seerrtv.ui.focus.rememberAppFocusManager
 import ca.devmesh.seerrtv.ui.state.FocusArea
 import ca.devmesh.seerrtv.ui.state.MediaDetailsStateManager
@@ -428,20 +429,18 @@ fun MediaDetails(
         }
     }
 
-    // Add LaunchedEffect to fetch similar media
-    LaunchedEffect(mediaDetailsState) {
-        when (val details = mediaDetailsState) {
-            is ApiResult.Success<MediaDetails> -> {
-                val media = details.data
-                // Clear previous similar media pages and fetch first page
-                viewModel.clearSimilarMediaPages()
-                viewModel.getSimilarMedia(media.id, media.mediaType?.name?.lowercase() ?: "", 1)
-            }
-
-            else -> {
-                stateManager.similarMediaItems = emptyList()
-                stateManager.hasSimilarMedia = false
-            }
+    // Fetch similar media once per title. Keyed on the title, not the whole details object:
+    // polling replaces that object every cycle, which used to clear and refetch this row.
+    val similarFor = (mediaDetailsState as? ApiResult.Success<MediaDetails>)?.data
+        ?.let { it.id to (it.mediaType?.name?.lowercase() ?: "") }
+    LaunchedEffect(similarFor) {
+        if (similarFor != null) {
+            // Clear previous similar media pages and fetch first page
+            viewModel.clearSimilarMediaPages()
+            viewModel.getSimilarMedia(similarFor.first, similarFor.second, 1)
+        } else {
+            stateManager.similarMediaItems = emptyList()
+            stateManager.hasSimilarMedia = false
         }
     }
 
@@ -1322,7 +1321,7 @@ fun MediaDetails(
                 }
 
                 // Register MediaDetails with centralized DpadController using original business logic
-                val dpadConfig = createMediaDetailsDpadConfig(
+                val dpadConfig = rememberStableDpadConfig(createMediaDetailsDpadConfig(
                     route = "details",
                     focusManager = appFocusManager,
                     onUp = {
@@ -2139,7 +2138,7 @@ fun MediaDetails(
                         }
                         // Note: Issue modals handle their own BACK button events via BackHandler
                     }
-                )
+                ))
 
                 LaunchedEffect(dpadConfig) {
                     dpadController.registerScreen(dpadConfig)
@@ -2173,8 +2172,12 @@ fun MediaDetails(
                     // Backdrop image
                     if (!media.backdropPath.isNullOrBlank()) {
                         AsyncImage(
+                            // Same size and cache keys as the home backdrop (MainScreen's
+                            // MediaBackdrop), so opening a title from home reuses that image.
                             model = ImageRequest.Builder(context)
-                                .data("https://image.tmdb.org/t/p/original${media.backdropPath}")
+                                .data("https://image.tmdb.org/t/p/w1280${media.backdropPath}")
+                                .memoryCacheKey("backdrop_${media.backdropPath}")
+                                .diskCacheKey("backdrop_${media.backdropPath}")
                                 .build(),
                             contentDescription = null,
                             imageLoader = imageLoader,

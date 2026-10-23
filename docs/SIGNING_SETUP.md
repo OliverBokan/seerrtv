@@ -14,8 +14,8 @@ cp tv/signing.properties.template tv/signing.properties
 ### 2. Edit signing.properties
 Update the file with your actual keystore information:
 ```properties
-# Path to your keystore file (relative to project root)
-storeFile=../localSigningKey.jks
+# Path to your keystore file (absolute, or relative to the project root)
+storeFile=/path/to/your/keystore.jks
 
 # Your keystore password
 storePassword=your_actual_keystore_password
@@ -28,7 +28,7 @@ keyPassword=your_actual_key_password
 ```
 
 ### 3. Verify Keystore Path
-Make sure your keystore file exists at the specified path. The default path assumes `localSigningKey.jks` is located one directory above the project root.
+Make sure your keystore file exists at the specified path. Keep it outside the repository; the path can be absolute or relative to the project root.
 
 ## Security Notes
 

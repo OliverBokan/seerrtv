@@ -7,16 +7,23 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import ca.devmesh.seerrtv.data.ApiResult
+import ca.devmesh.seerrtv.data.CardMetadata
+import ca.devmesh.seerrtv.data.CardMetadataStore
 import ca.devmesh.seerrtv.data.SeerrApiService
 import ca.devmesh.seerrtv.model.*
 import ca.devmesh.seerrtv.R
 import ca.devmesh.seerrtv.ui.position.ScrollPositionManager
-import com.pierfrancescosoffritti.androidyoutubeplayer.BuildConfig
+import ca.devmesh.seerrtv.util.SharedPreferencesUtil
+import ca.devmesh.seerrtv.BuildConfig
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.io.File
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
@@ -29,6 +36,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.withLock
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -194,6 +203,11 @@ class SeerrViewModel @Inject constructor(
     companion object {
         private const val MAX_CACHE_SIZE = 100
         private const val DEFAULT_CACHE_TIME_MS = 10_000L
+
+        // Parallel per-card details fetches for the Recently Added and Recent Requests rows,
+        // shared by both. Below the API client's 8 requests per host so the other rows and the
+        // splash's Sonarr/Radarr calls still get a connection.
+        private const val CARD_DETAILS_CONCURRENCY = 4
         private const val TAG = "SeerrViewModel"
 
         
@@ -201,6 +215,10 @@ class SeerrViewModel @Inject constructor(
         private const val MIN_UPDATE_INTERVAL_MS = 5000L         // Minimum time between updates
         private const val FAST_UPDATE_INTERVAL_MS = 15_000L      // Fast polling when downloading every 15 seconds
         private const val SLOW_UPDATE_INTERVAL_MS = 30_000L      // Slow polling when not downloading every 30 seconds
+        private const val SETTLED_UPDATE_INTERVAL_MS = 120_000L  // Nothing pending or downloading (see determinePollingInterval)
+        // Seerr MediaStatus values with nothing in progress: UNKNOWN (never requested), AVAILABLE,
+        // BLOCKLISTED, DELETED. PENDING (2), PROCESSING (3) and PARTIALLY_AVAILABLE (4) can still change.
+        private val SETTLED_MEDIA_STATUSES = setOf(1, 5, 6, 7)
         private const val MAX_FAILURE_COUNT = 3                  // Max failures before stopping updates
     }
 
@@ -221,8 +239,16 @@ class SeerrViewModel @Inject constructor(
     private val cacheTimestamps = mutableMapOf<MediaCategory, Long>()
     private val categoryMediaLists = mutableMapOf<MediaCategory, MutableList<Media>>()
     private val _mediaDetailsCache = MutableStateFlow<Map<String, CachedMediaDetails>>(emptyMap())
+
+    // Card metadata for the Recently Added and Recent Requests rows, kept between launches (see
+    // CardMetadataStore). Rows read only the title, artwork and overview from it — request and
+    // availability status come from the list itself — so day-old metadata is harmless.
+    private val cardMetadataStore = CardMetadataStore(File(context.cacheDir, "card-metadata-v1.json"))
+    private val cardDetailsInFlight = mutableMapOf<String, Deferred<CardMetadata?>>()
+    private val cardDetailsLock = Mutex()
+    private val cardDetailsPermits = Semaphore(CARD_DETAILS_CONCURRENCY)
     private val _currentMediaDetails =
-        MutableStateFlow<ApiResult<MediaDetails>>(ApiResult.Loading())
+        MutableStateFlow<ApiResult<MediaDetails>>(ApiResult.Loading)
     private var currentMediaId: String? = null
     private var currentMediaType: String? = null
     private var initialLoadDone = false
@@ -301,7 +327,7 @@ class SeerrViewModel @Inject constructor(
 
         val job = viewModelScope.launch {
             val result = apiService.getRatingsData(mediaId, mediaType)
-            Log.d(TAG, "Ratings API response: $result")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Ratings API response: $result")
             if (result is ApiResult.Success) {
                 ratingsCache[key] = CachedRatings(result.data, System.currentTimeMillis())
             } else if (result is ApiResult.Error) {
@@ -472,6 +498,7 @@ class SeerrViewModel @Inject constructor(
         _customSliderData.value = emptyMap()
         customSliderCacheTimestamps.clear()
         _mediaDetailsCache.value = emptyMap()
+        viewModelScope.launch { cardMetadataStore.clear() }
         _watchlistMembership.value = emptySet()
     }
 
@@ -489,7 +516,7 @@ class SeerrViewModel @Inject constructor(
 
         MediaCategory.entries.forEach { category ->
             _categoryData.value = _categoryData.value.toMutableMap().apply {
-                put(category, ApiResult.Loading())
+                put(category, ApiResult.Loading)
             }
         }
 
@@ -501,7 +528,7 @@ class SeerrViewModel @Inject constructor(
             MediaCategory.NETWORKS
         ).forEach { category ->
             _categoryCardData.value = _categoryCardData.value.toMutableMap().apply {
-                put(category, ApiResult.Loading())
+                put(category, ApiResult.Loading)
             }
         }
 
@@ -520,6 +547,10 @@ class SeerrViewModel @Inject constructor(
     }
 
     fun loadAllCategories() {
+        // The splash may already have started this load right after sign-in. Cancelling it here
+        // (as MainScreen's own call used to) would drop its in-flight rows, so leave it running
+        // unless a refresh was asked for.
+        if (activeJobs["loadAll"]?.isActive == true && !_needsRefresh.value) return
         // Cancel any existing load job
         activeJobs["loadAll"]?.cancel()
 
@@ -807,75 +838,114 @@ class SeerrViewModel @Inject constructor(
      * Refreshes a category with stronger force options, including a complete data clear
      * This is used for critical refresh operations like after a request is submitted
      */
-    fun refreshCategoryWithForce(category: MediaCategory?) {
+    // Forced refreshes per category: the running one, and whether one more is queued after it.
+    private val forcedRefreshJobs = mutableMapOf<MediaCategory, Job>()
+    private val forcedRefreshQueued = mutableSetOf<MediaCategory>()
+
+    /**
+     * Refreshes [category] from page 1 with its data cleared first (used after a request is
+     * made, deleted or approved). Returns the job, so a caller can wait for the fresh data.
+     *
+     * Several paths ask for this after one action (the request handler, the request view model,
+     * home on return). If a refresh of the category is already running, one more run is queued
+     * after it rather than starting a second refresh alongside it; further calls share that
+     * queued run.
+     */
+    fun refreshCategoryWithForce(category: MediaCategory?): Job? {
         if (category == null) {
             // Handle null case - just clear any current reset event
             _carouselResetEvents.value = null
-            return
+            return null
         }
 
-        viewModelScope.launch {
-            if (BuildConfig.DEBUG) {
-                Log.d("SeerrTV", "🔄 Performing forced refresh for ${category.name}")
+        val running = forcedRefreshJobs[category]?.takeIf { it.isActive }
+        if (running != null) {
+            if (!forcedRefreshQueued.add(category)) return running
+            return viewModelScope.launch {
+                running.join()
+                forcedRefreshQueued.remove(category)
+                runForcedRefresh(category)
+            }.also { forcedRefreshJobs[category] = it }
+        }
+        return viewModelScope.launch { runForcedRefresh(category) }
+            .also { forcedRefreshJobs[category] = it }
+    }
+
+    private suspend fun runForcedRefresh(category: MediaCategory) {
+        if (BuildConfig.DEBUG) {
+            Log.d("SeerrTV", "🔄 Performing forced refresh for ${category.name}")
+        }
+
+        try {
+            // First notify UI that we're loading
+            _categoryData.value = _categoryData.value.toMutableMap().apply {
+                put(category, ApiResult.Loading)
             }
 
-            try {
-                // First notify UI that we're loading
-                _categoryData.value = _categoryData.value.toMutableMap().apply {
-                    put(category, ApiResult.Loading())
-                }
+            // Clear existing data completely and remove from cacheTimestamps
+            clearCategoryData(category)
+            cacheTimestamps.remove(category)
 
-                // Clear existing data completely and remove from cacheTimestamps
-                clearCategoryData(category)
-                cacheTimestamps.remove(category)
+            // Reset API pagination
+            resetApiPagination(category)
 
-                // Reset API pagination
-                resetApiPagination(category)
+            // Force a carousel reset first to make sure the view is clean
+            forceCarouselReset(category, animate = true)
 
-                // Force a carousel reset first to make sure the view is clean
-                forceCarouselReset(category, animate = true)
+            // Small delay to ensure reset is processed
+            delay(200.milliseconds)
 
-                // Small delay to ensure reset is processed
-                delay(200.milliseconds)
+            // Load and wait for it. (This used to start refreshCategory, which only launches the
+            // load, and then guess with a fixed 500 ms delay.)
+            loadForcedRefresh(category)
 
-                // Now perform the standard refresh
-                refreshCategory(category)
-
-                // Add a delay to ensure data fetch is complete
-                delay(500.milliseconds)
-
-                // Check if data was loaded - if not, force another reload
-                if (categoryMediaLists[category]?.isEmpty() == true) {
-                    if (BuildConfig.DEBUG) {
-                        Log.d(
-                            "SeerrTV",
-                            "⚠️ No data loaded after refresh for ${category.name}, retrying..."
-                        )
-                    }
-                    refreshCategory(category)
-                    delay(300.milliseconds)
-                }
-
-                // Final force carousel update and reset to ensure UI is updated
-                _carouselUpdates.value = CarouselUpdateEvent(
-                    category = category,
-                    itemsBefore = 0,
-                    itemsAfter = categoryMediaLists[category]?.size ?: 0
-                )
-
-                // Also force a final carousel reset
-                forceCarouselReset(category, animate = true)
-
+            // Still empty: try once more
+            if (categoryMediaLists[category]?.isEmpty() == true) {
                 if (BuildConfig.DEBUG) {
-                    Log.d("SeerrTV", "✅ Forced refresh completed for ${category.name}")
                     Log.d(
                         "SeerrTV",
-                        "📊 Category now has ${categoryMediaLists[category]?.size ?: 0} items"
+                        "⚠️ No data loaded after refresh for ${category.name}, retrying..."
                     )
                 }
-            } catch (e: Exception) {
-                Log.e("SeerrTV", "Error during forced refresh of ${category.name}: ${e.message}", e)
+                loadForcedRefresh(category)
             }
+
+            // Final force carousel update and reset to ensure UI is updated
+            _carouselUpdates.value = CarouselUpdateEvent(
+                category = category,
+                itemsBefore = 0,
+                itemsAfter = categoryMediaLists[category]?.size ?: 0
+            )
+
+            // Also force a final carousel reset
+            forceCarouselReset(category, animate = true)
+
+            if (BuildConfig.DEBUG) {
+                Log.d("SeerrTV", "✅ Forced refresh completed for ${category.name}")
+                Log.d(
+                    "SeerrTV",
+                    "📊 Category now has ${categoryMediaLists[category]?.size ?: 0} items"
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e("SeerrTV", "Error during forced refresh of ${category.name}: ${e.message}", e)
+        }
+    }
+
+    private suspend fun loadForcedRefresh(category: MediaCategory) {
+        categoryLoadingState[category] = true
+        try {
+            when (category) {
+                MediaCategory.MOVIE_GENRES,
+                MediaCategory.SERIES_GENRES,
+                MediaCategory.STUDIOS,
+                MediaCategory.NETWORKS -> loadCategoryCards(category, forceRefresh = true)
+                else -> loadCategory(category, forceRefresh = true)
+            }
+        } finally {
+            categoryLoadingState[category] = false
         }
     }
 
@@ -883,31 +953,31 @@ class SeerrViewModel @Inject constructor(
      * Resets the API pagination for a specific category
      * This ensures the next API call starts from page 1
      */
+    /**
+     * Puts a home row's pagination back to page 1 without fetching anything. This used to
+     * "reset" by fetching page 1 and throwing the result away; every caller reloads the row
+     * with forceRefresh straight afterwards, which fetches page 1 itself.
+     */
     fun resetApiPagination(category: MediaCategory) {
-        viewModelScope.launch {
-            try {
-                if (BuildConfig.DEBUG) {
-                    Log.d("SeerrTV", "🔄 Resetting API pagination for ${category.name}")
-                }
-
-                when (category) {
-                    MediaCategory.RECENTLY_ADDED -> apiService.getRecentlyAdded(reset = true)
-                    MediaCategory.RECENT_REQUESTS -> apiService.getRequests(reset = true)
-                    MediaCategory.POPULAR_MOVIES -> apiService.discoverMovies(reset = true)
-                    MediaCategory.WATCHLIST -> apiService.getWatchlist(reset = true)
-                    MediaCategory.TRENDING -> apiService.getTrending(reset = true)
-                    MediaCategory.UPCOMING_MOVIES -> apiService.getUpcomingMovies(reset = true)
-                    MediaCategory.POPULAR_SERIES -> apiService.getPopularSeries(reset = true)
-                    MediaCategory.UPCOMING_SERIES -> apiService.getUpcomingSeries(reset = true)
-                    MediaCategory.MOVIE_GENRES -> apiService.getMovieGenreSlider(context, reset = true)
-                    MediaCategory.SERIES_GENRES -> apiService.getTVGenreSlider(context, reset = true)
-                    MediaCategory.STUDIOS -> apiService.getStudios(reset = true)
-                    MediaCategory.NETWORKS -> apiService.getNetworks(reset = true)
-                }
-            } catch (e: Exception) {
-                Log.e("SeerrTV", "Error resetting pagination for ${category.name}: ${e.message}", e)
-            }
+        if (BuildConfig.DEBUG) {
+            Log.d("SeerrTV", "🔄 Resetting API pagination for ${category.name}")
         }
+        val key = when (category) {
+            MediaCategory.RECENTLY_ADDED -> "media"
+            MediaCategory.RECENT_REQUESTS -> "request"
+            MediaCategory.POPULAR_MOVIES -> "discover/movies"
+            MediaCategory.WATCHLIST -> "discover/watchlist"
+            MediaCategory.TRENDING -> "discover/trending"
+            MediaCategory.UPCOMING_MOVIES -> apiService.upcomingMoviesEndpoint()
+            MediaCategory.POPULAR_SERIES -> "discover/tv"
+            MediaCategory.UPCOMING_SERIES -> apiService.upcomingSeriesEndpoint()
+            // Card rows: their forced reload also passes reset = true, which clears their caches.
+            MediaCategory.MOVIE_GENRES -> "discover/genreslider/movie"
+            MediaCategory.SERIES_GENRES -> "discover/genreslider/tv"
+            MediaCategory.STUDIOS -> "studios"
+            MediaCategory.NETWORKS -> "networks"
+        }
+        apiService.resetPaginationState(key)
     }
 
     private suspend fun loadCategory(
@@ -931,13 +1001,9 @@ class SeerrViewModel @Inject constructor(
                     )
                 }
                 categoryMediaLists[category]?.clear()
-
-                // Reset pagination state in API service for this category
-                when (category) {
-                    MediaCategory.RECENTLY_ADDED -> apiService.getRecentlyAdded(reset = true)
-                    MediaCategory.RECENT_REQUESTS -> apiService.getRequests(reset = true)
-                    else -> {} // Other categories handle reset in their respective API calls
-                }
+                // No separate pagination reset: the fetch below passes reset = forceRefresh.
+                // (A throwaway getRecentlyAdded/getRequests call used to do it, which doubled
+                // /media and /request on every launch.)
             } else if (!cacheExpired && _categoryData.value[category] is ApiResult.Success) {
                 Log.d("SeerrTV", "Category $categoryTitle cache is still valid, skipping")
                 return
@@ -1423,13 +1489,6 @@ class SeerrViewModel @Inject constructor(
                                         "Page: ${paginationInfo?.currentPage ?: "unknown"}/${paginationInfo?.totalPages ?: "unknown"}, " +
                                         "Has more: ${paginationInfo?.hasMorePages}"
                             )
-
-                            // Update category state with current pagination info
-                            updateCategoryState(
-                                category,
-                                mediaCount,
-                                paginationInfo?.hasMorePages != false
-                            )
                         } else {
                             Log.d(
                                 "SeerrTV", "⚠️ Category ${getCategoryTitle(context, category)}: " +
@@ -1612,13 +1671,6 @@ class SeerrViewModel @Inject constructor(
                                         "Current Items: $cardCount, " +
                                         "Page: ${paginationInfo?.currentPage ?: "unknown"}/${paginationInfo?.totalPages ?: "unknown"}, " +
                                         "Has more: ${paginationInfo?.hasMorePages}"
-                            )
-
-                            // Update category state with current pagination info
-                            updateCategoryState(
-                                category,
-                                cardCount,
-                                paginationInfo?.hasMorePages != false
                             )
                         } else {
                             Log.d(
@@ -2002,7 +2054,7 @@ class SeerrViewModel @Inject constructor(
         currentTime: Long,
         cacheTimeMs: Long
     ) {
-        _currentMediaDetails.value = ApiResult.Loading()
+        _currentMediaDetails.value = ApiResult.Loading
         logDebug("Fetching media details for mediaId: $mediaId, mediaType: $mediaType")
         Log.d("SeerrViewModel", "fetchMediaDetails: mediaId=$mediaId, mediaType=$mediaType")
 
@@ -2019,34 +2071,28 @@ class SeerrViewModel @Inject constructor(
         mediaDetailsJobs[cacheKey] = viewModelScope.launch {
             try {
                 val result = when (mediaType.lowercase()) {
-                    "movie" -> {
-                        val movieDetails = fetchMovieDetails(mediaId, TimeUnit.MILLISECONDS.toMinutes(cacheTimeMs))
-                        if (movieDetails is ApiResult.Success) {
-                            val ratings = getRatingsCached(mediaId, "movie", DEFAULT_CACHE_TIME_MS)
-                            when (ratings) {
-                                is ApiResult.Success -> ApiResult.Success(
-                                    movieDetails.data.copy(ratings = ratings.data)
-                                )
-                                else -> movieDetails
+                    "movie", "tv" -> coroutineScope {
+                        // Ratings come from Seerr's slow RT/IMDb proxy, so start them alongside
+                        // the details instead of after them. getRatingsCached is the only place
+                        // ratings are fetched, so the screen makes one ratings call, not two.
+                        val type = mediaType.lowercase()
+                        val ratings = async { getRatingsCached(mediaId, type, DEFAULT_CACHE_TIME_MS) }
+                        val details = if (type == "movie") fetchMovieDetails(mediaId) else fetchTVDetails(mediaId)
+                        if (details is ApiResult.Success) {
+                            when (val r = ratings.await()) {
+                                is ApiResult.Success -> ApiResult.Success(details.data.copy(ratings = r.data))
+                                else -> details
                             }
-                        } else movieDetails
-                    }
-                    "tv" -> {
-                        Log.d("SeerrViewModel", "Calling fetchTVDetails for mediaId: $mediaId")
-                        val tvDetails = fetchTVDetails(mediaId)
-                        if (tvDetails is ApiResult.Success) {
-                            val ratings = getRatingsCached(mediaId, "tv", DEFAULT_CACHE_TIME_MS)
-                            when (ratings) {
-                                is ApiResult.Success -> ApiResult.Success(
-                                    tvDetails.data.copy(ratings = ratings.data)
-                                )
-                                else -> tvDetails
-                            }
-                        } else tvDetails
+                        } else {
+                            ratings.cancel()
+                            details
+                        }
                     }
                     else -> ApiResult.Error(Exception("Invalid media type: $mediaType"))
                 }
-                Log.d("SeerrViewModel", "fetchMediaDetails result: $result")
+                // Whole-object dumps (cast, crew, seasons) only in debug builds: they run on every
+                // details open and every poll.
+                if (BuildConfig.DEBUG) Log.d("SeerrViewModel", "fetchMediaDetails result: $result")
 
                 if (result is ApiResult.Success) {
                     _mediaDetailsCache.update {
@@ -2071,55 +2117,19 @@ class SeerrViewModel @Inject constructor(
         }
     }
 
-    private suspend fun fetchMovieDetails(
-        mediaId: String,
-        cacheTimeMinutes: Long
-    ): ApiResult<MediaDetails> {
+    // Details only, like fetchTVDetails. Ratings are merged in by the callers through
+    // getRatingsCached, so they are fetched once per screen and never by the polling loop.
+    private suspend fun fetchMovieDetails(mediaId: String): ApiResult<MediaDetails> {
         return try {
             when (val movieDetails = apiService.getMovieDetails(mediaId)) {
-                is ApiResult.Success -> {
-                    when (val ratingsResult = apiService.getRatingsData(mediaId, "movie")) {
-                        is ApiResult.Success -> {
-                            val result = ApiResult.Success(
-                                movieDetails.data.copy(
-                                    mediaType = MediaType.MOVIE,
-                                    ratings = ratingsResult.data
-                                )
-                            )
-                            _mediaDetailsCache.update {
-                                it + ("$mediaId-movie" to CachedMediaDetails(
-                                    result,
-                                    System.currentTimeMillis(),
-                                    cacheTimeMinutes
-                                ))
-                            }
-                            result
-                        }
-
-                        is ApiResult.Error -> {
-                            logError("Error fetching ratings: ${ratingsResult.exception}")
-                            val result =
-                                ApiResult.Success(movieDetails.data.copy(mediaType = MediaType.MOVIE))
-                            _mediaDetailsCache.update {
-                                it + ("$mediaId-movie" to CachedMediaDetails(
-                                    result,
-                                    System.currentTimeMillis(),
-                                    cacheTimeMinutes
-                                ))
-                            }
-                            result
-                        }
-
-                        is ApiResult.Loading -> ApiResult.Loading()
-                    }
-                }
+                is ApiResult.Success -> ApiResult.Success(movieDetails.data.copy(mediaType = MediaType.MOVIE))
 
                 is ApiResult.Error -> {
                     logError("Error fetching movie details: ${movieDetails.exception}")
                     movieDetails
                 }
 
-                is ApiResult.Loading -> ApiResult.Loading()
+                is ApiResult.Loading -> ApiResult.Loading
             }
         } catch (e: Exception) {
             // Cancelled, not failed: rethrow instead of surfacing it as an error.
@@ -2133,9 +2143,11 @@ class SeerrViewModel @Inject constructor(
         return try {
             when (val tvDetails = apiService.getTVDetails(mediaId)) {
                 is ApiResult.Success -> {
-                    Log.d("SeerrViewModel", "TV Details API response: ${tvDetails.data}")
-                    Log.d("SeerrViewModel", "TV Details mediaInfo: ${tvDetails.data.mediaInfo}")
-                    Log.d("SeerrViewModel", "TV Details mediaInfo.id: ${tvDetails.data.mediaInfo?.id}")
+                    if (BuildConfig.DEBUG) {
+                        Log.d("SeerrViewModel", "TV Details API response: ${tvDetails.data}")
+                        Log.d("SeerrViewModel", "TV Details mediaInfo: ${tvDetails.data.mediaInfo}")
+                        Log.d("SeerrViewModel", "TV Details mediaInfo.id: ${tvDetails.data.mediaInfo?.id}")
+                    }
                     // Legacy TV ratings fetch removed; handled by getRatingsCached path above
                     ApiResult.Success(tvDetails.data.copy(mediaType = MediaType.TV))
                 }
@@ -2145,7 +2157,7 @@ class SeerrViewModel @Inject constructor(
                     tvDetails
                 }
 
-                is ApiResult.Loading -> ApiResult.Loading()
+                is ApiResult.Loading -> ApiResult.Loading
             }
         } catch (e: Exception) {
             // Cancelled, not failed: rethrow instead of surfacing it as an error.
@@ -2304,6 +2316,46 @@ class SeerrViewModel @Inject constructor(
         _categoryData.value = newMap
     }
 
+    /**
+     * Card metadata for one home-row title: from [cardMetadataStore] when it has a fresh entry,
+     * otherwise fetched from movie/{id} or tv/{id}. A fetch already running for the same title
+     * (the other row asking for it) is joined instead of repeated, and at most
+     * [CARD_DETAILS_CONCURRENCY] fetches run at once across both rows. Null if the fetch failed.
+     */
+    private suspend fun fetchCardMetadata(mediaType: String, tmdbId: String): CardMetadata? {
+        // Titles and overviews are localized, so the language is part of the key.
+        val key = "$mediaType/$tmdbId/${SharedPreferencesUtil.getDiscoveryLanguage(context)}"
+        cardMetadataStore.get(key)?.let { return it }
+        val fetch = cardDetailsLock.withLock {
+            cardDetailsInFlight.getOrPut(key) {
+                // LAZY: started by await() below, after the lock is released, so the finally
+                // block can never try to re-take it while it is still held.
+                viewModelScope.async(start = CoroutineStart.LAZY) {
+                    try {
+                        val result = cardDetailsPermits.withPermit {
+                            if (mediaType == "movie") apiService.getMovieDetails(tmdbId)
+                            else apiService.getTVDetails(tmdbId)
+                        }
+                        (result as? ApiResult.Success)?.data?.let { d ->
+                            CardMetadata(
+                                id = d.id,
+                                title = d.title,
+                                name = d.name,
+                                originalTitle = d.originalTitle,
+                                overview = d.overview,
+                                posterPath = d.posterPath,
+                                backdropPath = d.backdropPath
+                            ).also { cardMetadataStore.put(key, it) }
+                        }
+                    } finally {
+                        cardDetailsLock.withLock { cardDetailsInFlight.remove(key) }
+                    }
+                }
+            }
+        }
+        return fetch.await()
+    }
+
     private suspend fun fetchRecentlyAdded(forceRefresh: Boolean): ApiResult<List<Media>> {
         return try {
             when (val response = apiService.getRecentlyAdded(reset = forceRefresh)) {
@@ -2385,24 +2437,29 @@ class SeerrViewModel @Inject constructor(
                         }
                     }
 
-                    val updatedMedia = newMedia.map { media ->
-                        val details = when (media.mediaType) {
-                            "movie" -> apiService.getMovieDetails(media.id.toString())
-                            "tv" -> apiService.getTVDetails(media.id.toString())
-                            else -> null
-                        }
-                        if (details is ApiResult.Success) {
-                            media.copy(
-                                title = details.data.title ?: details.data.name ?: "",
-                                name = details.data.name ?: "",
-                                posterPath = details.data.posterPath ?: "",
-                                backdropPath = details.data.backdropPath ?: "",
-                                overview = details.data.overview
-                            )
-                        } else {
-                            media
-                        }
+                    // One async per card so the fetches overlap; awaitAll keeps the list order.
+                    val updatedMedia = coroutineScope {
+                        newMedia.map { media ->
+                            async {
+                                val meta = when (media.mediaType) {
+                                    "movie", "tv" -> fetchCardMetadata(media.mediaType, media.id.toString())
+                                    else -> null
+                                }
+                                if (meta != null) {
+                                    media.copy(
+                                        title = meta.title ?: meta.name ?: "",
+                                        name = meta.name ?: "",
+                                        posterPath = meta.posterPath ?: "",
+                                        backdropPath = meta.backdropPath ?: "",
+                                        overview = meta.overview
+                                    )
+                                } else {
+                                    media
+                                }
+                            }
+                        }.awaitAll()
                     }
+                    cardMetadataStore.persist()
                     ApiResult.Success(updatedMedia, response.paginationInfo)
                 }
 
@@ -2411,7 +2468,7 @@ class SeerrViewModel @Inject constructor(
                     ApiResult.Error(response.exception)
                 }
 
-                is ApiResult.Loading -> ApiResult.Loading()
+                is ApiResult.Loading -> ApiResult.Loading
             }
         } catch (e: Exception) {
             // Cancelled, not failed: rethrow instead of surfacing it as an error.
@@ -2428,83 +2485,79 @@ class SeerrViewModel @Inject constructor(
                 is ApiResult.Success<RequestResponse> -> {
                     val mediaList = mutableListOf<Media>()
 
-                    // Process each request and fetch media details
-                    val deferredMedia = response.data.results.map { request ->
-                        coroutineScope {
+                    // Process each request and fetch media details. One scope around the whole
+                    // list so the fetches overlap; a coroutineScope per item would wait for each
+                    // fetch before starting the next. fetchCardMetadata caps the concurrency.
+                    val fetchedMedia = coroutineScope {
+                        response.data.results.map { request ->
                             async {
                                 val mediaType = request.media.mediaType
                                 val mediaId = request.media.tmdbId.toString()
                                 // Get detailed media information
-                                when (val details = if (mediaType == "movie") {
-                                    apiService.getMovieDetails(mediaId)
+                                val meta = fetchCardMetadata(mediaType, mediaId)
+                                if (meta != null) {
+                                    // Convert to Media object with all required details
+                                    Media(
+                                        id = meta.id,
+                                        mediaType = request.media.mediaType,
+                                        tmdbId = request.media.tmdbId,
+                                        tvdbId = request.media.tvdbId,
+                                        imdbId = request.media.imdbId,
+                                        status = request.media.status,
+                                        status4k = request.media.status4k,
+                                        createdAt = request.createdAt,
+                                        updatedAt = request.updatedAt,
+                                        lastSeasonChange = request.media.lastSeasonChange,
+                                        mediaAddedAt = request.media.mediaAddedAt,
+                                        serviceId = request.media.serviceId,
+                                        serviceId4k = request.media.serviceId4k,
+                                        externalServiceId = request.media.externalServiceId,
+                                        externalServiceId4k = request.media.externalServiceId4k,
+                                        externalServiceSlug = request.media.externalServiceSlug,
+                                        externalServiceSlug4k = request.media.externalServiceSlug4k,
+                                        ratingKey = request.media.ratingKey,
+                                        ratingKey4k = request.media.ratingKey4k,
+                                        serviceUrl = request.media.serviceUrl,
+                                        title = meta.title ?: meta.name ?: "",
+                                        originalTitle = meta.originalTitle ?: "",
+                                        name = meta.name ?: "",
+                                        overview = meta.overview,
+                                        posterPath = meta.posterPath ?: "",
+                                        backdropPath = meta.backdropPath ?: "",
+                                        mediaInfo = request.media.copy(
+                                            seasons = request.seasons.map { requestSeason ->
+                                                Season(
+                                                    id = requestSeason.id,
+                                                    seasonNumber = requestSeason.seasonNumber,
+                                                    status = requestSeason.status,
+                                                    airDate = null,
+                                                    episodeCount = null,
+                                                    name = null,
+                                                    overview = null,
+                                                    posterPath = null,
+                                                    status4k = null,
+                                                    createdAt = null,
+                                                    updatedAt = null
+                                                )
+                                            },
+                                            requests = null  // Keep requests as null since we'll use the request field
+                                        ),
+                                        request = request
+                                    )
                                 } else {
-                                    apiService.getTVDetails(mediaId)
-                                }) {
-                                    is ApiResult.Success -> {
-                                        // Convert to Media object with all required details
-                                        Media(
-                                            id = details.data.id,
-                                            mediaType = request.media.mediaType,
-                                            tmdbId = request.media.tmdbId,
-                                            tvdbId = request.media.tvdbId,
-                                            imdbId = request.media.imdbId,
-                                            status = request.media.status,
-                                            status4k = request.media.status4k,
-                                            createdAt = request.createdAt,
-                                            updatedAt = request.updatedAt,
-                                            lastSeasonChange = request.media.lastSeasonChange,
-                                            mediaAddedAt = request.media.mediaAddedAt,
-                                            serviceId = request.media.serviceId,
-                                            serviceId4k = request.media.serviceId4k,
-                                            externalServiceId = request.media.externalServiceId,
-                                            externalServiceId4k = request.media.externalServiceId4k,
-                                            externalServiceSlug = request.media.externalServiceSlug,
-                                            externalServiceSlug4k = request.media.externalServiceSlug4k,
-                                            ratingKey = request.media.ratingKey,
-                                            ratingKey4k = request.media.ratingKey4k,
-                                            serviceUrl = request.media.serviceUrl,
-                                            title = details.data.title ?: details.data.name ?: "",
-                                            originalTitle = details.data.originalTitle ?: "",
-                                            name = details.data.name ?: "",
-                                            overview = details.data.overview,
-                                            posterPath = details.data.posterPath ?: "",
-                                            backdropPath = details.data.backdropPath ?: "",
-                                            mediaInfo = request.media.copy(
-                                                seasons = request.seasons.map { requestSeason ->
-                                                    Season(
-                                                        id = requestSeason.id,
-                                                        seasonNumber = requestSeason.seasonNumber,
-                                                        status = requestSeason.status,
-                                                        airDate = null,
-                                                        episodeCount = null,
-                                                        name = null,
-                                                        overview = null,
-                                                        posterPath = null,
-                                                        status4k = null,
-                                                        createdAt = null,
-                                                        updatedAt = null
-                                                    )
-                                                },
-                                                requests = null  // Keep requests as null since we'll use the request field
-                                            ),
-                                            request = request
-                                        )
-                                    }
-
-                                    else -> {
-                                        Log.e(
-                                            "SeerrTV",
-                                            "Failed to get details for media $mediaId: $details"
-                                        )
-                                        null
-                                    }
+                                    Log.e(
+                                        "SeerrTV",
+                                        "Failed to get details for media $mediaId"
+                                    )
+                                    null
                                 }
                             }
-                        }
+                        }.awaitAll()
                     }
 
-                    // Wait for all media details to be fetched and filter out nulls
-                    mediaList.addAll(deferredMedia.mapNotNull { it.await() })
+                    // awaitAll keeps the request order; drop the items whose details failed
+                    mediaList.addAll(fetchedMedia.filterNotNull())
+                    cardMetadataStore.persist()
 
                     ApiResult.Success(mediaList, response.paginationInfo)
                 }
@@ -2517,7 +2570,7 @@ class SeerrViewModel @Inject constructor(
                     ApiResult.Error(response.exception)
                 }
 
-                is ApiResult.Loading -> ApiResult.Loading()
+                is ApiResult.Loading -> ApiResult.Loading
             }
         } catch (e: Exception) {
             // Cancelled, not failed: rethrow instead of surfacing it as an error.
@@ -3104,21 +3157,14 @@ class SeerrViewModel @Inject constructor(
         // Remove the cache timestamp to force refresh
         cacheTimestamps.remove(category)
 
-        // Reset the API pagination for this category
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                if (category == MediaCategory.RECENT_REQUESTS) {
-                    Log.d("SeerrViewModel", "♻️ Resetting API pagination for $category")
-                    apiService.getRequests(reset = true)
-                }
-            } catch (e: Exception) {
-                Log.e("SeerrViewModel", "Error resetting pagination for $category: ${e.message}")
-            }
+        // Reset the API pagination for this category (state only, no fetch)
+        if (category == MediaCategory.RECENT_REQUESTS) {
+            apiService.resetPaginationState("request")
         }
 
         // Update the state flow to show loading
         _categoryData.value = _categoryData.value.toMutableMap().apply {
-            put(category, ApiResult.Loading())
+            put(category, ApiResult.Loading)
         }
 
         // Emit explicit carousel update event
@@ -3197,7 +3243,7 @@ class SeerrViewModel @Inject constructor(
                 }
 
                 is ApiResult.Loading -> {
-                    _similarMediaState.value = ApiResult.Loading()
+                    _similarMediaState.value = ApiResult.Loading
                 }
             }
         } catch (e: Exception) {
@@ -3350,10 +3396,18 @@ class SeerrViewModel @Inject constructor(
         val hasDownloadStatus = currentDetails?.mediaInfo?.downloadStatus != null && 
                 currentDetails.mediaInfo.downloadStatus.isNotEmpty()
         
+        // Each poll makes Seerr fetch the title from TMDB, so titles with nothing in progress
+        // (in either tier) are checked less often. A request made here refreshes right away.
+        val mediaInfo = currentDetails?.mediaInfo
+        val isSettled = mediaInfo == null ||
+            (mediaInfo.status in SETTLED_MEDIA_STATUSES && mediaInfo.status4k in SETTLED_MEDIA_STATUSES)
+
         val interval = if (hasDownloadStatus) {
             // Faster updates for content being downloaded
             Log.d(TAG, "⏱️ Using fast polling interval (${FAST_UPDATE_INTERVAL_MS}ms) for downloading content")
             FAST_UPDATE_INTERVAL_MS
+        } else if (isSettled) {
+            SETTLED_UPDATE_INTERVAL_MS
         } else {
             // Slower updates for non-downloading content
             Log.d(TAG, "⏱️ Using slow polling interval (${SLOW_UPDATE_INTERVAL_MS}ms) for non-downloading content")
@@ -3429,7 +3483,17 @@ class SeerrViewModel @Inject constructor(
                     success = true
                     return@withTimeout
                 }
-                val result = if (existingJob?.isActive == true) {
+                // The details screen fetched this title moments before polling started; on the
+                // first cycle reuse that result instead of fetching the same details again.
+                val freshFromScreen = if (isInitialLoad) {
+                    _mediaDetailsCache.value[cacheKey]
+                        ?.takeIf { currentTime - it.timestamp < DEFAULT_CACHE_TIME_MS }
+                        ?.details
+                } else null
+                val result = if (freshFromScreen != null && existingJob?.isActive != true) {
+                    Log.d(TAG, "♻️ Initial polling cycle reusing details fetched by the screen for $cacheKey")
+                    freshFromScreen
+                } else if (existingJob?.isActive == true) {
                     Log.d(TAG, "⏳ Waiting for existing fetchMediaDetails job to complete for $cacheKey")
                     // Wait for the existing job to complete instead of skipping
                     existingJob.join()
@@ -3443,7 +3507,7 @@ class SeerrViewModel @Inject constructor(
                         "movie" -> {
                             // Don't fetch ratings during polling - only during initial load
                             // Ratings are static data that doesn't change frequently
-                            val md = fetchMovieDetails(tmdbId, TimeUnit.MILLISECONDS.toMinutes(DEFAULT_CACHE_TIME_MS))
+                            val md = fetchMovieDetails(tmdbId)
                             if (md is ApiResult.Success) {
                                 // Check if we already have cached ratings from initial load
                                 val cachedRatings = getRatingsCached(tmdbId, "movie", 0L) // 0L = check cache only, no fetching

@@ -17,11 +17,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shadow
@@ -76,11 +76,13 @@ fun MediaCard(
     cardWidth: Dp = 134.dp,
     showLabel: Boolean = false
 ) {
-    val scale by animateFloatAsState(if (isSelected) 1.15f else 1.0f, label = "")
+    // State, not a delegated value: read inside graphicsLayer so the focus animation only
+    // redraws the layer each frame instead of recomposing the whole card.
+    val scale = animateFloatAsState(if (isSelected) 1.15f else 1.0f, label = "")
     
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = modifier.scale(scale)
+        modifier = modifier.graphicsLayer { scaleX = scale.value; scaleY = scale.value }
     ) {
         when (mediaContent) {
             // Handle Person type specifically
@@ -270,18 +272,19 @@ private fun PersonCard(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(
-                        Brush.verticalGradient(
-                            colors = listOf(Color(0xFF1F2937), Color(0xFF111827))
-                        )
+                        CardBackgroundBrush
                     ),
                 contentAlignment = Alignment.Center
             ) {
                 // Image fills the entire card with rounded corners
                 if (!person.profilePath.isNullOrBlank()) {
-                    AsyncImage(
-                        model = ImageRequest.Builder(context)
+                    val personRequest = remember(person.profilePath) {
+                        ImageRequest.Builder(context)
                             .data("https://image.tmdb.org/t/p/w300_and_h450_face${person.profilePath}")
-                            .build(),
+                            .build()
+                    }
+                    AsyncImage(
+                        model = personRequest,
                         contentDescription = stringResource(R.string.mediaDiscovery_personImage),
                         imageLoader = imageLoader,
                         contentScale = ContentScale.Crop,
@@ -317,14 +320,7 @@ private fun PersonCard(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(
-                            Brush.verticalGradient(
-                                colors = listOf(
-                                    Color(0x00000000),
-                                    Color(0x99000000)
-                                ),
-                                startY = 0f,
-                                endY = 300f
-                            )
+                            BadgeScrimBrush
                         )
                 )
             }
@@ -398,18 +394,19 @@ private fun StandardMediaCard(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(
-                        Brush.verticalGradient(
-                            colors = listOf(Color(0xFF1F2937), Color(0xFF111827))
-                        )
+                        CardBackgroundBrush
                     )
             ) {
                 if (hasImagePath) {
-                    AsyncImage(
-                        model = ImageRequest.Builder(context)
+                    val posterRequest = remember(posterPath) {
+                        ImageRequest.Builder(context)
                             .data("https://image.tmdb.org/t/p/w300_and_h450_face$posterPath")
                             .memoryCacheKey("poster_$posterPath")
                             .diskCacheKey("poster_$posterPath")
-                            .build(),
+                            .build()
+                    }
+                    AsyncImage(
+                        model = posterRequest,
                         contentDescription = stringResource(R.string.common_mediaPoster),
                         imageLoader = imageLoader,
                         modifier = Modifier.fillMaxSize(),
@@ -484,7 +481,11 @@ private fun StandardMediaCard(
                     .align(Alignment.TopEnd)
                     .padding(8.dp)
                     .size(18.dp)
-                    .graphicsLayer(alpha = 0.8f)
+                    // Alpha applied per draw call: no offscreen buffer for every card's icon
+                    .graphicsLayer {
+                        alpha = 0.8f
+                        compositingStrategy = CompositingStrategy.ModulateAlpha
+                    }
             ) {
                 iconComposable(Modifier.fillMaxSize())
             }
@@ -534,9 +535,7 @@ private fun EmptyCard(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(
-                        Brush.verticalGradient(
-                            colors = listOf(Color(0xFF1F2937), Color(0xFF111827))
-                        )
+                        CardBackgroundBrush
                     ),
                 contentAlignment = Alignment.Center
             ) {
@@ -593,15 +592,7 @@ fun LetterAvatar(
     }
 
     // Use a more centered and balanced gradient for the background
-    val background = Brush.linearGradient(
-        colors = listOf(
-            Color(0xFF4A6572), // blue-gray
-            Color(0xFF3370FF), // vibrant blue
-            Color(0xFF9D29BC)  // purple accent
-        ),
-        start = Offset(0.2f, 0.2f),
-        end = Offset(200f, 200f)
-    )
+    val background = LetterAvatarBrush
 
     // Render a circular avatar with shadow and border
     Box(
@@ -833,3 +824,27 @@ internal fun CustomBlockedIcon(modifier: Modifier = Modifier) {
         )
     }
 }
+
+// Shared, immutable brushes: built once instead of per card on every recomposition.
+private val CardBackgroundBrush = Brush.verticalGradient(
+    colors = listOf(Color(0xFF1F2937), Color(0xFF111827))
+)
+
+private val BadgeScrimBrush = Brush.verticalGradient(
+    colors = listOf(
+        Color(0x00000000),
+        Color(0x99000000)
+    ),
+    startY = 0f,
+    endY = 300f
+)
+
+private val LetterAvatarBrush = Brush.linearGradient(
+    colors = listOf(
+        Color(0xFF4A6572), // blue-gray
+        Color(0xFF3370FF), // vibrant blue
+        Color(0xFF9D29BC)  // purple accent
+    ),
+    start = Offset(0.2f, 0.2f),
+    end = Offset(200f, 200f)
+)

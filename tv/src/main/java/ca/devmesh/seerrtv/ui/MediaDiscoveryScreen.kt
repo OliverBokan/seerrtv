@@ -752,6 +752,8 @@ fun MediaDiscoveryScreen(
                                 .crossfade(true)
                                 .build(),
                             contentDescription = keywordText,
+                            // The app's loader (shared caches); without it Coil builds its own default one.
+                            imageLoader = imageLoader,
                             contentScale = ContentScale.FillWidth,
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -915,6 +917,8 @@ fun MediaDiscoveryScreen(
                                             .crossfade(true)
                                             .build(),
                                         contentDescription = keywordText,
+                                        // The app's loader (shared caches); without it Coil builds its own default one.
+                                        imageLoader = imageLoader,
                                         contentScale = ContentScale.Crop,
                                         modifier = Modifier.fillMaxSize()
                                     )

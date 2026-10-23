@@ -13,6 +13,7 @@ import ca.devmesh.seerrtv.model.MediaType
 import ca.devmesh.seerrtv.model.Movie
 import ca.devmesh.seerrtv.model.SearchResult
 import ca.devmesh.seerrtv.model.TV
+import ca.devmesh.seerrtv.util.SharedPreferencesUtil
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.delay
@@ -70,6 +71,10 @@ class MediaDiscoveryViewModel @Inject constructor(
     
     private val _selectedStudioName = MutableStateFlow<String?>(null)
     val selectedStudioName: StateFlow<String?> = _selectedStudioName
+
+    // Names for selected keyword filters (included and excluded); MediaFilters only stores IDs.
+    private val _keywordNames = MutableStateFlow<Map<Int, String>>(emptyMap())
+    val keywordNames: StateFlow<Map<Int, String>> = _keywordNames
     
     private val _availableGenres = MutableStateFlow<List<SeerrApiService.GenreResponse>>(emptyList())
     val availableGenres: StateFlow<List<SeerrApiService.GenreResponse>> = _availableGenres
@@ -872,17 +877,28 @@ class MediaDiscoveryViewModel @Inject constructor(
         }
     }
 
+    // The filters drawer asks for its reference lists every time it opens, and the providers
+    // screen asks for providers again. These lists change rarely, so each is fetched once per
+    // session (per media type / language / region where it depends on them) and reused.
+    private val genresCache = mutableMapOf<String, List<SeerrApiService.GenreResponse>>()
+    private val watchProvidersCache = mutableMapOf<String, List<ca.devmesh.seerrtv.model.Provider>>()
+
     fun loadFilterOptions() {
         viewModelScope.launch {
-            // Load regions
-            when (val result = apiService.getRegions()) {
-                is ApiResult.Success -> _availableRegions.value = result.data
-                is ApiResult.Error -> Log.e("MediaDiscoveryViewModel", "Failed to load regions", result.exception)
-                else -> {}
-            }
-            
+            // Regions and languages load in parallel, and only until they have loaded once
+            val regionsJob = if (_availableRegions.value.isEmpty()) launch {
+                when (val result = apiService.getRegions()) {
+                    is ApiResult.Success -> _availableRegions.value = result.data
+                    is ApiResult.Error -> Log.e("MediaDiscoveryViewModel", "Failed to load regions", result.exception)
+                    else -> {}
+                }
+            } else null
+
             // Load languages from the Seerr API (full TMDB set)
-            when (val result = apiService.getLanguages()) {
+            if (_availableLanguages.value.isNotEmpty()) {
+                // Reopening the drawer starts the language search from the full list, as before
+                _languageSearchResults.value = _availableLanguages.value
+            } else when (val result = apiService.getLanguages()) {
                 is ApiResult.Success -> {
                     _availableLanguages.value = result.data
                     _languageSearchResults.value = result.data
@@ -890,6 +906,7 @@ class MediaDiscoveryViewModel @Inject constructor(
                 is ApiResult.Error -> Log.e("MediaDiscoveryViewModel", "Failed to load languages", result.exception)
                 else -> {}
             }
+            regionsJob?.join()
             
             // Load content ratings (static list)
             _contentRatings.value = apiService.getContentRatings()
@@ -903,6 +920,9 @@ class MediaDiscoveryViewModel @Inject constructor(
     }
     
     fun loadGenres(mediaType: MediaType) {
+        // Genre names are localized, so the discovery language is part of the key
+        val key = "$mediaType/${SharedPreferencesUtil.getDiscoveryLanguage(getApplication())}"
+        genresCache[key]?.let { _availableGenres.value = it; return }
         viewModelScope.launch {
             // genres/movie | genres/tv — full filter list (matches Seerr web app; not genreslider)
             val result = if (mediaType == MediaType.MOVIE) {
@@ -912,7 +932,8 @@ class MediaDiscoveryViewModel @Inject constructor(
             }
 
             when (result) {
-                is ApiResult.Success -> _availableGenres.value = result.data.sortedBy { it.name }
+                is ApiResult.Success -> _availableGenres.value =
+                    result.data.sortedBy { it.name }.also { genresCache[key] = it }
                 is ApiResult.Error -> Log.e("MediaDiscoveryViewModel", "Failed to load genres", result.exception)
                 else -> {}
             }
@@ -931,10 +952,16 @@ class MediaDiscoveryViewModel @Inject constructor(
     }
 
     fun loadWatchProviders(mediaType: MediaType, region: String) {
+        val key = "$mediaType/$region"
+        watchProvidersCache[key]?.let {
+            _selectedWatchRegion.value = region
+            _availableWatchProviders.value = it
+            return
+        }
         viewModelScope.launch {
             _selectedWatchRegion.value = region
             when (val result = apiService.getWatchProviders(mediaType, region)) {
-                is ApiResult.Success -> _availableWatchProviders.value = result.data
+                is ApiResult.Success -> _availableWatchProviders.value = result.data.also { watchProvidersCache[key] = it }
                 is ApiResult.Error -> {
                     Log.e("MediaDiscoveryViewModel", "Failed to load watch providers", result.exception)
                     _availableWatchProviders.value = emptyList()
@@ -968,6 +995,25 @@ class MediaDiscoveryViewModel @Inject constructor(
     // But for now, let's just clear them to avoid confusion.
     fun clearKeywordSearch() {
         _keywordSearchResults.value = emptyList()
+    }
+
+    fun rememberKeywordName(keyword: ca.devmesh.seerrtv.model.Keyword) {
+        _keywordNames.value += (keyword.id to keyword.name)
+    }
+
+    /** Looks up names for selected keyword IDs that weren't picked in this session (e.g. restored filters). */
+    fun resolveKeywordNames(ids: List<Int>) {
+        val missing = ids.filter { it !in _keywordNames.value }
+        if (missing.isEmpty()) return
+        viewModelScope.launch {
+            missing.forEach { id ->
+                when (val result = apiService.getKeyword(id)) {
+                    is ApiResult.Success -> rememberKeywordName(result.data)
+                    is ApiResult.Error -> Log.e("MediaDiscoveryViewModel", "Failed to load keyword $id", result.exception)
+                    else -> {}
+                }
+            }
+        }
     }
     
     fun searchStudios(query: String) {

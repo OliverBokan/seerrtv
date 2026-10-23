@@ -13,6 +13,7 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -66,6 +67,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.ui.res.stringResource
 import ca.devmesh.seerrtv.R
 import ca.devmesh.seerrtv.model.BrowseModels
+import ca.devmesh.seerrtv.model.Keyword
 import ca.devmesh.seerrtv.model.MediaType
 import ca.devmesh.seerrtv.util.SafeKeyEventHandler
 import ca.devmesh.seerrtv.util.SharedPreferencesUtil
@@ -120,6 +122,7 @@ sealed class FilterScreen {
     object FirstAirDate : FilterScreen()
     object Genres : FilterScreen()
     object Keywords : FilterScreen()
+    object ExcludeKeywords : FilterScreen()
     object Language : FilterScreen()
     object ContentRating : FilterScreen()
     object Runtime : FilterScreen()
@@ -504,10 +507,12 @@ private fun RenderCategoriesScreen(
         items(filterSections) { sectionTitle ->
             val sectionIndex = filterSections.indexOf(sectionTitle)
             val isActive = isFilterActive(sectionTitle, filters)
+            val selectionCount = getFilterScreenFromTitle(sectionTitle)?.let { selectionCount(it, filters) }
             FilterMenuItemWithIndicator(
                 title = sectionTitle,
                 isFocused = sectionIndex + clearAllOffset == selectedIndex,
-                isActive = isActive
+                isActive = isActive,
+                count = selectionCount
             )
         }
         
@@ -587,28 +592,25 @@ private fun RenderFilterSubScreen(
             )
         }
         FilterScreen.Keywords -> {
-            val searchResults by viewModel.keywordSearchResults.collectAsState()
-            
-            // Note: We need a way to track selected keywords objects, but MediaFilters only stores IDs.
-            // For now, we can only show selected if they are in the search results.
-            // A better approach would be to fetch selected keywords details, but we'll start with this.
-            val selectedKeywords = searchResults.filter { filters.keywords.contains(it.id) }
-            
-            FilterSearchSelection(
-                searchResults = searchResults,
-                selectedItems = selectedKeywords,
-                itemLabel = { it.name },
-                onSearch = { query -> viewModel.searchKeywords(query) },
-                onItemSelected = { keyword ->
-                    val currentIds = filters.keywords
-                    val newIds = if (currentIds.contains(keyword.id)) {
-                        currentIds - keyword.id
-                    } else {
-                        currentIds + keyword.id
-                    }
-                    onFiltersChange(filters.copy(keywords = newIds))
+            KeywordFilterScreen(
+                viewModel = viewModel,
+                selectedIds = filters.keywords,
+                accentColor = Color(0xFF4CAF50),
+                onSelectionChange = { ids ->
+                    // A keyword can't be both required and excluded
+                    onFiltersChange(filters.copy(keywords = ids, excludeKeywords = filters.excludeKeywords - ids.toSet()))
                 },
-                onClearSearch = { viewModel.clearKeywordSearch() },
+                onBack = onBackToCategories
+            )
+        }
+        FilterScreen.ExcludeKeywords -> {
+            KeywordFilterScreen(
+                viewModel = viewModel,
+                selectedIds = filters.excludeKeywords,
+                accentColor = Color(0xFFE57373),
+                onSelectionChange = { ids ->
+                    onFiltersChange(filters.copy(excludeKeywords = ids, keywords = filters.keywords - ids.toSet()))
+                },
                 onBack = onBackToCategories
             )
         }
@@ -779,6 +781,7 @@ private fun getFilterSections(mediaType: MediaType): List<String> {
             stringResource(R.string.filter_studios),
             stringResource(R.string.filter_genres),
             stringResource(R.string.filter_keywords),
+            stringResource(R.string.filter_excludeKeywords),
             stringResource(R.string.filter_originalLanguage),
             stringResource(R.string.filter_contentRating),
             stringResource(R.string.filter_runtime),
@@ -792,6 +795,7 @@ private fun getFilterSections(mediaType: MediaType): List<String> {
             stringResource(R.string.filter_firstAirDate),
             stringResource(R.string.filter_genres),
             stringResource(R.string.filter_keywords),
+            stringResource(R.string.filter_excludeKeywords),
             stringResource(R.string.filter_originalLanguage),
             stringResource(R.string.filter_contentRating),
             stringResource(R.string.filter_runtime),
@@ -810,6 +814,7 @@ private val movieFilterScreens = listOf(
     FilterScreen.Studios,
     FilterScreen.Genres,
     FilterScreen.Keywords,
+    FilterScreen.ExcludeKeywords,
     FilterScreen.Language,
     FilterScreen.ContentRating,
     FilterScreen.Runtime,
@@ -822,6 +827,7 @@ private val seriesFilterScreens = listOf(
     FilterScreen.FirstAirDate,
     FilterScreen.Genres,
     FilterScreen.Keywords,
+    FilterScreen.ExcludeKeywords,
     FilterScreen.Language,
     FilterScreen.ContentRating,
     FilterScreen.Runtime,
@@ -848,6 +854,7 @@ private fun getFilterTitle(screen: FilterScreen): String {
         FilterScreen.FirstAirDate -> stringResource(R.string.filter_firstAirDate)
         FilterScreen.Genres -> stringResource(R.string.filter_genres)
         FilterScreen.Keywords -> stringResource(R.string.filter_keywords)
+        FilterScreen.ExcludeKeywords -> stringResource(R.string.filter_excludeKeywords)
         FilterScreen.Language -> stringResource(R.string.filter_originalLanguage)
         FilterScreen.ContentRating -> stringResource(R.string.filter_contentRating)
         FilterScreen.Runtime -> stringResource(R.string.filter_runtime)
@@ -897,7 +904,8 @@ private fun FilterMenuItemWithIndicator(
     title: String,
     isFocused: Boolean,
     isActive: Boolean,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    count: Int? = null
 ) {
     Row(
         modifier = modifier
@@ -917,7 +925,8 @@ private fun FilterMenuItemWithIndicator(
         
         if (isActive) {
             Text(
-                text = "●",
+                // Multi-select filters show how many values are picked; the rest just a dot
+                text = if (count != null && count > 0) "$count" else "●",
                 color = Color(0xFF4CAF50), // Green dot
                 style = MaterialTheme.typography.bodyLarge
             )
@@ -934,6 +943,7 @@ private fun isFilterScreenActive(screen: FilterScreen, filters: BrowseModels.Med
             filters.releaseFrom != null || filters.releaseTo != null
         FilterScreen.Genres -> filters.genres.isNotEmpty()
         FilterScreen.Keywords -> filters.keywords.isNotEmpty()
+        FilterScreen.ExcludeKeywords -> filters.excludeKeywords.isNotEmpty()
         FilterScreen.Language -> filters.originalLanguage != null
         FilterScreen.ContentRating -> filters.contentRatings.isNotEmpty()
         FilterScreen.Runtime -> filters.runtimeMin != null || filters.runtimeMax != null
@@ -948,6 +958,21 @@ private fun isFilterScreenActive(screen: FilterScreen, filters: BrowseModels.Med
 }
 
 /**
+ * Number of values picked in a multi-select filter, or null for range/single-value filters
+ */
+private fun selectionCount(screen: FilterScreen, filters: BrowseModels.MediaFilters): Int? {
+    return when (screen) {
+        FilterScreen.Genres -> filters.genres.size
+        FilterScreen.Keywords -> filters.keywords.size
+        FilterScreen.ExcludeKeywords -> filters.excludeKeywords.size
+        FilterScreen.ContentRating -> filters.contentRatings.size
+        FilterScreen.Networks -> filters.networks.size
+        FilterScreen.StreamingServices -> filters.watchProviders.size
+        else -> null
+    }
+}
+
+/**
  * Map section title string to FilterScreen
  */
 @Composable
@@ -957,6 +982,7 @@ private fun getFilterScreenFromTitle(sectionTitle: String): FilterScreen? {
         stringResource(R.string.filter_firstAirDate) -> FilterScreen.FirstAirDate
         stringResource(R.string.filter_genres) -> FilterScreen.Genres
         stringResource(R.string.filter_keywords) -> FilterScreen.Keywords
+        stringResource(R.string.filter_excludeKeywords) -> FilterScreen.ExcludeKeywords
         stringResource(R.string.filter_originalLanguage) -> FilterScreen.Language
         stringResource(R.string.filter_contentRating) -> FilterScreen.ContentRating
         stringResource(R.string.filter_runtime) -> FilterScreen.Runtime
@@ -1476,24 +1502,77 @@ private fun <T> FilterMultiListSelection(
 }
 
 /**
- * Search selection component for filters (Keywords, Studios, etc.)
+ * Keyword picker shared by the Keywords and Exclude Keywords filters.
+ * Resolves names for selected IDs so their chips survive new searches.
  */
 @Composable
-private fun <T> FilterSearchSelection(
+private fun KeywordFilterScreen(
+    viewModel: MediaDiscoveryViewModel,
+    selectedIds: List<Int>,
+    accentColor: Color,
+    onSelectionChange: (List<Int>) -> Unit,
+    onBack: () -> Unit
+) {
+    val searchResults by viewModel.keywordSearchResults.collectAsState()
+    val keywordNames by viewModel.keywordNames.collectAsState()
+
+    LaunchedEffect(selectedIds) {
+        viewModel.resolveKeywordNames(selectedIds)
+    }
+
+    val selectedKeywords = selectedIds.map { id -> Keyword(id = id, name = keywordNames[id] ?: "…") }
+
+    FilterSearchSelection(
+        searchResults = searchResults,
+        selectedItems = selectedKeywords,
+        itemId = { it.id },
+        itemLabel = { it.name },
+        accentColor = accentColor,
+        searchPlaceholder = stringResource(R.string.filter_searchKeywords),
+        onSearch = { query -> viewModel.searchKeywords(query) },
+        onItemSelected = { keyword ->
+            viewModel.rememberKeywordName(keyword)
+            onSelectionChange(
+                if (keyword.id in selectedIds) selectedIds - keyword.id else selectedIds + keyword.id
+            )
+        },
+        onItemRemoved = { keyword -> onSelectionChange(selectedIds - keyword.id) },
+        onClearSearch = { viewModel.clearKeywordSearch() },
+        onBack = onBack
+    )
+}
+
+/**
+ * Multi-select search component for filters (Keywords).
+ * Selected items stay visible as chips above the search field, independent of the current results.
+ * Chips: Left/Right move between them, Enter removes one, Down goes to the search field.
+ */
+@Composable
+private fun <T, ID> FilterSearchSelection(
     searchResults: List<T>,
     selectedItems: List<T>,
+    itemId: (T) -> ID,
     itemLabel: (T) -> String,
+    accentColor: Color,
+    searchPlaceholder: String,
     onSearch: (String) -> Unit,
     onItemSelected: (T) -> Unit,
+    onItemRemoved: (T) -> Unit,
     onClearSearch: () -> Unit,
     onBack: (() -> Unit)? = null
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var selectedIndex by remember { mutableIntStateOf(0) } // 0 is search bar, 1+ are results
+    var chipsFocused by remember { mutableStateOf(false) }
+    var chipIndex by remember { mutableIntStateOf(0) }
     val listState = rememberLazyListState()
     val searchFieldFocusRequester = remember { FocusRequester() }
+    // Focus target around the text field: D-pad can land on the search bar without popping the keyboard
+    val searchBoxFocusRequester = remember { FocusRequester() }
     val resultsListFocusRequester = remember { FocusRequester() }
+    val chipsFocusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
+    val selectedIds = selectedItems.map(itemId).toSet()
     
     // Debounce search
     LaunchedEffect(searchQuery) {
@@ -1506,7 +1585,25 @@ private fun <T> FilterSearchSelection(
     }
     
     LaunchedEffect(Unit) {
-        searchFieldFocusRequester.requestFocus()
+        // Straight to typing on a fresh filter; with picks already made, let the user see them first
+        if (selectedItems.isEmpty()) searchFieldFocusRequester.requestFocus() else searchBoxFocusRequester.requestFocus()
+    }
+
+    // Keep the chip cursor valid as chips are removed
+    LaunchedEffect(selectedItems.size) {
+        if (chipIndex > selectedItems.lastIndex) chipIndex = selectedItems.lastIndex.coerceAtLeast(0)
+        if (selectedItems.isEmpty() && chipsFocused) {
+            selectedIndex = 0
+            searchBoxFocusRequester.requestFocus()
+        }
+    }
+
+    // Auto-scroll to keep selected result visible
+    LaunchedEffect(selectedIndex) {
+        val resultIndex = selectedIndex - 1
+        if (resultIndex >= 0 && resultIndex < searchResults.size) {
+            listState.animateScrollToItem(resultIndex)
+        }
     }
     
     Column(
@@ -1514,18 +1611,142 @@ private fun <T> FilterSearchSelection(
             .fillMaxSize()
             .focusable()
     ) {
+        if (selectedItems.isNotEmpty()) {
+            Text(
+                text = stringResource(R.string.filter_selectedCount, selectedItems.size),
+                color = Color.Gray,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp)
+                    .focusRequester(chipsFocusRequester)
+                    .onFocusChanged { focusState -> chipsFocused = focusState.isFocused }
+                    .focusable()
+                    .onKeyEvent { event ->
+                        if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                        when {
+                            event.key == Key.Back -> {
+                                if (onBack != null) {
+                                    onBack()
+                                    true
+                                } else false
+                            }
+                            event.key == Key.DirectionLeft -> {
+                                if (chipIndex > 0) chipIndex--
+                                true
+                            }
+                            event.key == Key.DirectionRight -> {
+                                if (chipIndex < selectedItems.lastIndex) chipIndex++
+                                true
+                            }
+                            event.key == Key.DirectionDown -> {
+                                selectedIndex = 0
+                                searchBoxFocusRequester.requestFocus()
+                                true
+                            }
+                            event.key == Key.DirectionUp -> true
+                            KeyUtils.isEnterKey(event.nativeKeyEvent.keyCode) -> {
+                                selectedItems.getOrNull(chipIndex)?.let { item ->
+                                    // Removing the last chip takes this row out of composition, so
+                                    // hand focus to the search bar first rather than after the fact
+                                    if (selectedItems.size == 1) {
+                                        selectedIndex = 0
+                                        searchBoxFocusRequester.requestFocus()
+                                    }
+                                    onItemRemoved(item)
+                                }
+                                true
+                            }
+                            else -> false
+                        }
+                    }
+            ) {
+                selectedItems.forEachIndexed { index, item ->
+                    val isChipFocused = chipsFocused && index == chipIndex
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .background(
+                                if (isChipFocused) Color(0xFF2C3E50) else Color(0xFF1E2732),
+                                RoundedCornerShape(16.dp)
+                            )
+                            .border(
+                                1.dp,
+                                if (isChipFocused) Color.White else accentColor.copy(alpha = 0.6f),
+                                RoundedCornerShape(16.dp)
+                            )
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = itemLabel(item),
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.widthIn(max = 200.dp)
+                        )
+                        Text(
+                            text = " ✕",
+                            color = if (isChipFocused) Color.White else Color.Gray,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+        }
+
         // Search Bar with OutlinedTextField
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(8.dp)
-                .background(if (selectedIndex == 0) Color(0xFF2C3E50) else Color(0xFF1E2732), RoundedCornerShape(8.dp))
+                .background(if (selectedIndex == 0 && !chipsFocused) Color(0xFF2C3E50) else Color(0xFF1E2732), RoundedCornerShape(8.dp))
+                .focusRequester(searchBoxFocusRequester)
+                .onFocusChanged { focusState ->
+                    if (focusState.isFocused) selectedIndex = 0
+                }
+                .focusable()
+                .onKeyEvent { event ->
+                    if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                    when {
+                        event.key == Key.Back -> {
+                            if (onBack != null) {
+                                onBack()
+                                true
+                            } else false
+                        }
+                        event.key == Key.DirectionUp -> {
+                            if (selectedItems.isNotEmpty()) chipsFocusRequester.requestFocus()
+                            true
+                        }
+                        event.key == Key.DirectionDown -> {
+                            if (searchResults.isNotEmpty()) {
+                                selectedIndex = 1
+                                resultsListFocusRequester.requestFocus()
+                            }
+                            true
+                        }
+                        event.key == Key.DirectionLeft || event.key == Key.DirectionRight -> true
+                        KeyUtils.isEnterKey(event.nativeKeyEvent.keyCode) -> {
+                            // Only an explicit Enter starts typing (and opens the keyboard)
+                            searchFieldFocusRequester.requestFocus()
+                            true
+                        }
+                        else -> false
+                    }
+                }
                 .padding(12.dp)
         ) {
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
-                placeholder = { Text("Search keywords...", color = Color.Gray) },
+                placeholder = { Text(searchPlaceholder, color = Color.Gray) },
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedTextColor = Color.White,
                     unfocusedTextColor = Color.White,
@@ -1563,13 +1784,26 @@ private fun <T> FilterSearchSelection(
                                         if (BuildConfig.DEBUG) {
                                             Log.d("FilterSearchSelection", "⬇️ Navigating to results, requesting focus")
                                         }
+                                    } else {
+                                        searchBoxFocusRequester.requestFocus()
                                     }
                                     true
                                 }
-                                android.view.KeyEvent.KEYCODE_DPAD_UP,
+                                android.view.KeyEvent.KEYCODE_DPAD_UP -> {
+                                    // Up to the selected chips, if any
+                                    focusManager.clearFocus(force = true)
+                                    if (selectedItems.isNotEmpty()) {
+                                        chipsFocusRequester.requestFocus()
+                                    } else {
+                                        searchBoxFocusRequester.requestFocus()
+                                    }
+                                    true
+                                }
                                 android.view.KeyEvent.KEYCODE_DPAD_LEFT,
                                 android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                                    // Leave typing mode but stay on the search bar
                                     focusManager.clearFocus(force = true)
+                                    searchBoxFocusRequester.requestFocus()
                                     true
                                 }
                                 else -> {
@@ -1613,7 +1847,7 @@ private fun <T> FilterSearchSelection(
                                 selectedIndex--
                             } else if (selectedIndex == 1) {
                                 selectedIndex = 0
-                                searchFieldFocusRequester.requestFocus()
+                                searchBoxFocusRequester.requestFocus()
                             }
                             true
                         }
@@ -1626,7 +1860,7 @@ private fun <T> FilterSearchSelection(
                         KeyUtils.isEnterKey(keyEvent.nativeKeyEvent.keyCode) && keyEvent.type == KeyEventType.KeyDown -> {
                             if (selectedIndex > 0 && selectedIndex <= searchResults.size) {
                                 if (BuildConfig.DEBUG) {
-                                    Log.d("FilterSearchSelection", "🎯 Selecting keyword at index ${selectedIndex - 1}")
+                                    Log.d("FilterSearchSelection", "🎯 Selecting item at index ${selectedIndex - 1}")
                                 }
                                 onItemSelected(searchResults[selectedIndex - 1])
                             }
@@ -1638,7 +1872,7 @@ private fun <T> FilterSearchSelection(
         ) {
             items(searchResults.size) { index ->
                 val item = searchResults[index]
-                val isSelected = selectedItems.contains(item)
+                val isSelected = itemId(item) in selectedIds
                 
                 Row(
                     modifier = Modifier
@@ -1659,7 +1893,7 @@ private fun <T> FilterSearchSelection(
                     if (isSelected) {
                         Text(
                             text = "✓",
-                            color = Color(0xFF4CAF50),
+                            color = accentColor,
                             style = MaterialTheme.typography.bodyLarge
                         )
                     }
@@ -1956,6 +2190,8 @@ private fun <T, ID> FilterSearchSelectionSingle(
     var selectedIndex by remember { mutableIntStateOf(if (currentSelectionLabel != null) 0 else 1) }
     val listState = rememberLazyListState()
     val searchFieldFocusRequester = remember { FocusRequester() }
+    // Focus target around the text field: D-pad can land on the search bar without popping the keyboard
+    val searchBoxFocusRequester = remember { FocusRequester() }
     val resultsListFocusRequester = remember { FocusRequester() }
     val currentSelectionFocusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
@@ -1978,6 +2214,22 @@ private fun <T, ID> FilterSearchSelectionSingle(
         }
     }
     
+    // The "Current Selection" row shifts every index below it by one when it appears or goes away
+    val hasSelectionRow = currentSelectionLabel != null
+    var prevHasSelectionRow by remember { mutableStateOf(hasSelectionRow) }
+    LaunchedEffect(hasSelectionRow) {
+        if (hasSelectionRow == prevHasSelectionRow) return@LaunchedEffect
+        if (hasSelectionRow) {
+            selectedIndex++
+        } else if (selectedIndex == 0) {
+            // The focused row was the one just cleared
+            searchBoxFocusRequester.requestFocus()
+        } else {
+            selectedIndex--
+        }
+        prevHasSelectionRow = hasSelectionRow
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -2012,7 +2264,7 @@ private fun <T, ID> FilterSearchSelectionSingle(
                                 }
                                 event.key == Key.DirectionDown -> {
                                     selectedIndex = 1
-                                    searchFieldFocusRequester.requestFocus()
+                                    searchBoxFocusRequester.requestFocus()
                                     true
                                 }
                                 KeyUtils.isEnterKey(event.nativeKeyEvent.keyCode) -> {
@@ -2062,6 +2314,43 @@ private fun <T, ID> FilterSearchSelectionSingle(
                         Color(0xFF1E2732), 
                     RoundedCornerShape(8.dp)
                 )
+                .focusRequester(searchBoxFocusRequester)
+                .onFocusChanged { focusState ->
+                    if (focusState.isFocused) selectedIndex = if (currentSelectionLabel != null) 1 else 0
+                }
+                .focusable()
+                .onKeyEvent { event ->
+                    if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                    when {
+                        event.key == Key.Back -> {
+                            if (onBack != null) {
+                                onBack()
+                                true
+                            } else false
+                        }
+                        event.key == Key.DirectionUp -> {
+                            if (currentSelectionLabel != null) {
+                                selectedIndex = 0
+                                currentSelectionFocusRequester.requestFocus()
+                            }
+                            true
+                        }
+                        event.key == Key.DirectionDown -> {
+                            if (searchResults.isNotEmpty()) {
+                                selectedIndex = if (currentSelectionLabel != null) 2 else 1
+                                resultsListFocusRequester.requestFocus()
+                            }
+                            true
+                        }
+                        event.key == Key.DirectionLeft || event.key == Key.DirectionRight -> true
+                        KeyUtils.isEnterKey(event.nativeKeyEvent.keyCode) -> {
+                            // Only an explicit Enter starts typing (and opens the keyboard)
+                            searchFieldFocusRequester.requestFocus()
+                            true
+                        }
+                        else -> false
+                    }
+                }
                 .padding(8.dp)
         ) {
             OutlinedTextField(
@@ -2113,12 +2402,16 @@ private fun <T, ID> FilterSearchSelectionSingle(
                                     if (searchResults.isNotEmpty()) {
                                         selectedIndex = (if (currentSelectionLabel != null) 2 else 1)
                                         resultsListFocusRequester.requestFocus()
+                                    } else {
+                                        searchBoxFocusRequester.requestFocus()
                                     }
                                     true
                                 }
                                 android.view.KeyEvent.KEYCODE_DPAD_LEFT,
                                 android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                                    // Leave typing mode but stay on the search bar
                                     focusManager.clearFocus(force = true)
+                                    searchBoxFocusRequester.requestFocus()
                                     true
                                 }
                                 else -> {
@@ -2169,7 +2462,7 @@ private fun <T, ID> FilterSearchSelectionSingle(
                                 selectedIndex--
                             } else if (selectedIndex == offset) {
                                 selectedIndex = if (currentSelectionLabel != null) 1 else 0
-                                searchFieldFocusRequester.requestFocus()
+                                searchBoxFocusRequester.requestFocus()
                             }
                             true
                         }
@@ -2705,7 +2998,9 @@ private fun StreamingServicesFilterContent(
                         // Provider Logo
                         AsyncImage(
                             model = ImageRequest.Builder(context)
-                                .data("https://image.tmdb.org/t/p/w500${provider.logoPath}")
+                                // Drawn at 60 dp (~120 px at 1080p): w154 is the smallest TMDB logo size
+                                // that covers it (w500 was about 10x the pixels)
+                                .data("https://image.tmdb.org/t/p/w154${provider.logoPath}")
                                 .memoryCacheKey("provider_${provider.id}")
                                 .diskCacheKey("provider_${provider.id}")
                                 .build(),

@@ -402,6 +402,9 @@
     <string name="filter_releaseDate">Veröffentlichungsdatum</string>
     <string name="filter_genres">Genres</string>
     <string name="filter_keywords">Schlüsselwörter</string>
+    <string name="filter_excludeKeywords">Schlüsselwörter ausschließen</string>
+    <string name="filter_searchKeywords">Schlüsselwörter suchen…</string>
+    <string name="filter_selectedCount">%1$d ausgewählt</string>
     <string name="filter_originalLanguage">Originalsprache</string>
     <string name="filter_contentRating">Altersfreigabe</string>
     <string name="filter_runtime">Laufzeit (Minuten)</string>

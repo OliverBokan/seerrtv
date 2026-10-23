@@ -12,6 +12,7 @@ import androidx.compose.ui.unit.sp
 import ca.devmesh.seerrtv.util.SharedPreferencesUtil
 import java.time.format.DateTimeFormatter
 import java.time.LocalTime
+import java.time.temporal.ChronoUnit
 import kotlinx.coroutines.delay
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -21,7 +22,9 @@ import kotlin.time.Duration.Companion.milliseconds
  */
 @Composable
 fun Clock(context: Context) {
-    var currentTime by remember { mutableStateOf(LocalTime.now()) }
+    // Minute precision: the clock shows hours and minutes, and a value that changed every second
+    // recomposed the clock (and re-read the 24-hour preference) every second.
+    var currentTime by remember { mutableStateOf(LocalTime.now().truncatedTo(ChronoUnit.MINUTES)) }
     val use24HourClock by rememberUpdatedState(SharedPreferencesUtil.use24HourClock(context))
     val formatter =
             remember(use24HourClock) {
@@ -34,9 +37,11 @@ fun Clock(context: Context) {
 
     LaunchedEffect(Unit) {
         while (true) {
-            currentTime = LocalTime.now()
-            // Update every second but only show hours and minutes
-            delay(1000.milliseconds)
+            val now = LocalTime.now()
+            currentTime = now.truncatedTo(ChronoUnit.MINUTES)
+            // Sleep until the next minute starts
+            val untilNextMinuteMs = 60_000L - (now.second * 1000L + now.nano / 1_000_000L)
+            delay(untilNextMinuteMs.coerceAtLeast(250L).milliseconds)
         }
     }
 

@@ -37,3 +37,10 @@ tv/release
 tv/signing.properties
 tv/browser-config.properties
 *.hprof
+
+# tools/perf: commit only the recorded baseline/final summaries; raw run logs and ad-hoc runs stay local
+tools/perf/results/*
+!tools/perf/results/baseline-*/
+!tools/perf/results/final-*/
+!tools/perf/results/release-*/
+tools/perf/results/*/run*/

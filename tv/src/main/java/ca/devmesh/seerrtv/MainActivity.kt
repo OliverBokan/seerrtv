@@ -2,6 +2,7 @@ package ca.devmesh.seerrtv
 
 import android.app.Application
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
 import androidx.activity.compose.setContent
 import androidx.activity.OnBackPressedCallback
@@ -27,6 +28,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -46,6 +48,7 @@ import androidx.navigation.NavController
 import androidx.navigation.NavType
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.lifecycleScope
 import ca.devmesh.seerrtv.data.SeerrApiService
 import ca.devmesh.seerrtv.data.SeerrApiService.ApiValidationResult
 import ca.devmesh.seerrtv.data.ApiResult
@@ -91,12 +94,14 @@ import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.HiltAndroidApp
 import java.net.URLDecoder
 import javax.inject.Inject
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.MainScope
 import okhttp3.OkHttpClient
@@ -108,8 +113,6 @@ enum class LoadingStepType { INFO, WARNING, SUCCESS, ERROR }
 
 @HiltAndroidApp
 class SeerrTV : Application() {
-
-    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private val imageLoaderLock = Any()
     private var imageLoaderInstance: ImageLoader? = null
@@ -159,27 +162,14 @@ class SeerrTV : Application() {
             .build()
     }
 
-    /**
-     * Clears Coil caches off the main thread to avoid ANRs (disk eviction can block).
-     */
-    fun clearImageCachesAsync() {
-        applicationScope.launch(Dispatchers.IO) {
-            try {
-                val loader = obtainImageLoader()
-                loader.memoryCache?.clear()
-                loader.diskCache?.clear()
-                Log.d("SeerrTV", "Cleared image caches on IO dispatcher")
-            } catch (e: Exception) {
-                Log.w("SeerrTV", "Image cache clear failed: ${e.message}")
-            }
-        }
-    }
-
     override fun onCreate() {
         super.onCreate()
         appInstance = this
     }
 }
+
+/** Longest the splash waits after "Ready" for the home rows (see MainActivity.awaitHomeRows). */
+private const val HOME_ROWS_WAIT_MS = 3_000L
 
 // Define top bar focus state data class
 data class TopBarFocusState(
@@ -348,21 +338,67 @@ class MainActivity : AppCompatActivity() {
         showConnectionErrorDialog = true
     }
 
+    private var lastStepShownAtMs = 0L
+    private var lastStepMinVisibleMs = 0L
+
+    /** Waits out whatever is left of the last splash step's minimum visible time. */
+    private suspend fun awaitLastStepReadable() {
+        val remaining = lastStepMinVisibleMs - (SystemClock.elapsedRealtime() - lastStepShownAtMs)
+        if (remaining > 0) delay(remaining.milliseconds)
+    }
+
+    /**
+     * Keeps the splash up until the home rows have something to show, so home does not open on
+     * empty placeholders. The rows started loading right after sign-in (see homeFollowsSplash),
+     * so this is usually already true or close. Gives up after [HOME_ROWS_WAIT_MS].
+     */
+    private suspend fun awaitHomeRows() {
+        withTimeoutOrNull(HOME_ROWS_WAIT_MS.milliseconds) {
+            sharedViewModel.categoryData.first { rows ->
+                rows[MediaCategory.RECENTLY_ADDED] is ApiResult.Success ||
+                    rows.values.count { it is ApiResult.Success } >= 3
+            }
+        }
+    }
+
     private suspend fun addLoadingStep(
         message: String,
         type: LoadingStepType = LoadingStepType.INFO
     ) {
+        // Keep the previous step on screen long enough to read before showing this one. The time
+        // its work already took counts towards that, so a slow step adds no extra wait. (Steps
+        // used to sleep 300 / 800 ms after every step on top of the work, about 4.8 s per launch;
+        // with no pacing at all they flashed past unreadably.)
+        // The validation effect can restart once during startup and repeat its first step.
+        if (loadingSteps.lastOrNull() == LoadingStep(message, type)) return
+        awaitLastStepReadable()
         loadingSteps = loadingSteps + LoadingStep(message, type)
         Log.d("MainActivity", "Loading step: $message (${type.name})")
-
-        // Custom delay based on message type
-        val delayMs = when (type) {
-            LoadingStepType.ERROR -> 5000L    // Errors stay longer for visibility
-            LoadingStepType.WARNING -> 2000L // Warning messages get a moderate delay
-            LoadingStepType.SUCCESS -> 800L   // Success messages get moderate delay
-            LoadingStepType.INFO -> 300L    // Info messages get short delay
+        lastStepShownAtMs = SystemClock.elapsedRealtime()
+        lastStepMinVisibleMs = when (type) {
+            LoadingStepType.INFO -> 300L
+            LoadingStepType.SUCCESS -> 600L
+            else -> 0L
         }
-        delay(delayMs.milliseconds)
+
+        // Problems hold the splash right away so they are read before anything else happens.
+        val holdMs = when (type) {
+            LoadingStepType.ERROR -> 5000L
+            LoadingStepType.WARNING -> 2000L
+            LoadingStepType.SUCCESS, LoadingStepType.INFO -> 0L
+        }
+        if (holdMs > 0) delay(holdMs.milliseconds)
+    }
+
+    /**
+     * True when a successful sign-in leads straight to home: no profile picker will be shown
+     * (mirrors the post-auth decision below, without consuming the skip-once flag).
+     */
+    private fun homeFollowsSplash(): Boolean {
+        if (SharedPreferencesUtil.shouldSkipProfileSelectionOnce(this)) return true
+        val profiles = SharedPreferencesUtil.getProfiles(this)
+        val activeNeedsPin = SharedPreferencesUtil.getActiveProfile(this)?.pinHash?.isNotBlank() == true
+        return !(profiles.size > 1 || (profiles.size == 1 && activeNeedsPin))
     }
 
     private suspend fun validateConfiguration() {
@@ -374,9 +410,8 @@ class MainActivity : AppCompatActivity() {
         if (config != null) {
             Log.d("MainActivity", "📋 Config found, updating API service")
             try {
+                // updateConfig rebuilds the HTTP client synchronously, so it is ready on return.
                 apiService.updateConfig(config)
-                // Small delay to ensure HTTP client is fully ready after refresh
-                delay(100.milliseconds)
                 addLoadingStep(getString(R.string.splashScreen_checkingConnection))
 
                 Log.d("MainActivity", "🔗 Testing base connection...")
@@ -398,9 +433,26 @@ class MainActivity : AppCompatActivity() {
                                 )
                                 apiValidationError = null
                                 isAuthError = false
+                                // Sonarr and Radarr load together; the steps below wait for each.
+                                val sonarrLoad = lifecycleScope.async { apiService.loadSonarrConfiguration() }
+                                val radarrLoad = lifecycleScope.async { apiService.loadRadarrConfiguration() }
+                                // When the splash will go straight to home, start the home rows
+                                // as soon as Sonarr and Radarr have loaded, while the splash is
+                                // still showing its steps, rather than after it closes (MainScreen
+                                // then finds the load running). Not before: started together, the
+                                // rows' dozen-plus requests held every connection and Sonarr's
+                                // per-server calls waited behind them, stretching the splash.
+                                val rowsStartedEarly = homeFollowsSplash()
+                                if (rowsStartedEarly) {
+                                    lifecycleScope.launch {
+                                        runCatching { sonarrLoad.await() }
+                                        runCatching { radarrLoad.await() }
+                                        sharedViewModel.loadAllCategories()
+                                    }
+                                }
                                 // Load server configurations with detailed feedback
                                 addLoadingStep(getString(R.string.splashScreen_loadingSonarrConfig))
-                                apiService.loadSonarrConfiguration()
+                                sonarrLoad.await()
 
                                 // Get Sonarr server counts and add to loading steps
                                 val sonarrData = apiService.getCachedSonarrData()
@@ -449,7 +501,7 @@ class MainActivity : AppCompatActivity() {
                                 }
 
                                 addLoadingStep(getString(R.string.splashScreen_loadingRadarrConfig))
-                                apiService.loadRadarrConfiguration()
+                                radarrLoad.await()
 
                                 // Get Radarr server counts and add to loading steps
                                 val radarrData = apiService.getCachedRadarrData()
@@ -539,6 +591,8 @@ class MainActivity : AppCompatActivity() {
                                     getString(R.string.splashScreen_ready),
                                     LoadingStepType.SUCCESS
                                 )
+                                awaitLastStepReadable()
+                                if (rowsStartedEarly) awaitHomeRows()
                                 // Mark authentication as complete
                                 isAuthenticationComplete = true
                                 // Authentication complete - for direct flavor, let SplashScreen control navigation
@@ -787,7 +841,6 @@ class MainActivity : AppCompatActivity() {
                                 // New auth cycle starting; allow post-auth navigation again.
                                 didHandlePostAuthNavigation = false
                                 isAuthenticationComplete = false
-                                delay(300.milliseconds) // Show initial loading message
                                 validateConfiguration()
                                 // For play flavor, call onContinue after validation
                                 // For direct flavor, let SplashScreen call onContinue after update dialog is handled
@@ -809,30 +862,22 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
 
-                        // Create derived state for top bar focus from AppFocusManager
-                        val (isInTopBarNow, isSearchFocusedNow, isSettingsFocusedNow) = when (val focus =
-                            appFocusManager.currentFocus) {
-                            is AppFocusState.TopBar -> Triple(
-                                true,
-                                focus.focus == TopBarFocus.Search,
-                                focus.focus == TopBarFocus.Settings
-                            )
-
-                            else -> Triple(false, false, false)
+                        // Which top-bar element has focus, or null when focus is elsewhere. Read
+                        // through derivedStateOf: every D-pad move inside a screen replaces
+                        // currentFocus, and reading it directly here recomposed this root scope,
+                        // and with it the whole app tree, on every press.
+                        val topBarFocus by remember(appFocusManager) {
+                            derivedStateOf { (appFocusManager.currentFocus as? AppFocusState.TopBar)?.focus }
                         }
-                        val isAvatarFocusedNow = appFocusManager.currentFocus is AppFocusState.TopBar &&
-                            (appFocusManager.currentFocus as AppFocusState.TopBar).focus == TopBarFocus.Avatar
                         val currentRouteLocal =
                             baseRoute(navController.currentDestination?.route)
                         val topBarFocusState = TopBarFocusState(
-                            isInTopBar = isInTopBarNow,
-                            isSearchFocused = isSearchFocusedNow,
-                            isMoviesFocused = appFocusManager.currentFocus is AppFocusState.TopBar && 
-                                             (appFocusManager.currentFocus as AppFocusState.TopBar).focus == TopBarFocus.Movies,
-                            isSeriesFocused = appFocusManager.currentFocus is AppFocusState.TopBar && 
-                                             (appFocusManager.currentFocus as AppFocusState.TopBar).focus == TopBarFocus.Series,
-                            isSettingsFocused = isSettingsFocusedNow,
-                            isAvatarFocused = isAvatarFocusedNow,
+                            isInTopBar = topBarFocus != null,
+                            isSearchFocused = topBarFocus == TopBarFocus.Search,
+                            isMoviesFocused = topBarFocus == TopBarFocus.Movies,
+                            isSeriesFocused = topBarFocus == TopBarFocus.Series,
+                            isSettingsFocused = topBarFocus == TopBarFocus.Settings,
+                            isAvatarFocused = topBarFocus == TopBarFocus.Avatar,
                             showRefreshHint = if (currentRouteLocal == "main") topBarShowRefreshHint else false,
                             isRefreshRowVisible = if (currentRouteLocal == "main") topBarIsRefreshRowVisible else false
                         )

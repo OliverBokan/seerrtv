@@ -28,7 +28,7 @@ class IssueViewModel @Inject constructor(
 
     private val _submitState = MutableStateFlow(SubmitState())
     val submitState: StateFlow<SubmitState> = _submitState
-    private val _commentSubmission = MutableStateFlow<ApiResult<Issue>>(ApiResult.Loading())
+    private val _commentSubmission = MutableStateFlow<ApiResult<Issue>>(ApiResult.Loading)
 
     fun submitIssue(request: CreateIssueRequest) {
         _submitState.update { it.copy(isSubmitting = true, success = false, errorMessage = null, createdIssue = null) }
@@ -49,7 +49,7 @@ class IssueViewModel @Inject constructor(
 
     fun addComment(issueId: Int, message: String) {
         _submitState.update { it.copy(isSubmitting = true, success = false, errorMessage = null, createdIssue = null) }
-        _commentSubmission.value = ApiResult.Loading()
+        _commentSubmission.value = ApiResult.Loading
         viewModelScope.launch {
             when (val result = issueRepository.addComment(issueId, message)) {
                 is ApiResult.Success -> {
@@ -70,7 +70,7 @@ class IssueViewModel @Inject constructor(
     fun resetSubmitState() {
         Log.d("IssueViewModel", "🔄 Resetting submit state")
         _submitState.update { it.copy(isSubmitting = false, success = false, errorMessage = null, createdIssue = null) }
-        _commentSubmission.value = ApiResult.Loading()
+        _commentSubmission.value = ApiResult.Loading
         Log.d("IssueViewModel", "🔄 Submit state reset complete: ${_submitState.value}")
     }
 }

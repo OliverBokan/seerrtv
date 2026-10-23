@@ -453,6 +453,9 @@
     <string name="filter_releaseDate">Väljalaske kuupäev</string>
     <string name="filter_genres">Žanrid</string>
     <string name="filter_keywords">Märksõnad</string>
+    <string name="filter_excludeKeywords">Välista märksõnad</string>
+    <string name="filter_searchKeywords">Otsi märksõnu…</string>
+    <string name="filter_selectedCount">%1$d valitud</string>
     <string name="filter_originalLanguage">Originaalkeel</string>
     <string name="filter_contentRating">Sisuhinnang</string>
     <string name="filter_runtime">Kestus (minutites)</string>

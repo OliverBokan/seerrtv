@@ -37,7 +37,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.geometry.Offset
@@ -64,6 +64,7 @@ import ca.devmesh.seerrtv.model.Request
 import ca.devmesh.seerrtv.navigation.NavigationManager
 import ca.devmesh.seerrtv.navigation.rememberNavigationManager
 import ca.devmesh.seerrtv.R
+import ca.devmesh.seerrtv.ui.components.uniqueLazyKeys
 import ca.devmesh.seerrtv.ui.components.AuthenticationErrorHandler
 import ca.devmesh.seerrtv.ui.position.ScrollPositionManager
 import ca.devmesh.seerrtv.util.CommonUtil
@@ -75,6 +76,7 @@ import ca.devmesh.seerrtv.util.SharedPreferencesUtil
 import ca.devmesh.seerrtv.ui.focus.AppFocusManager
 import ca.devmesh.seerrtv.ui.focus.AppFocusState
 import ca.devmesh.seerrtv.ui.focus.TopBarFocus
+import ca.devmesh.seerrtv.ui.focus.rememberStableDpadConfig
 import ca.devmesh.seerrtv.ui.focus.DpadController
 import ca.devmesh.seerrtv.ui.focus.createMainScreenDpadConfig
 import ca.devmesh.seerrtv.viewmodel.ActiveRow
@@ -87,10 +89,9 @@ import coil3.ImageLoader
 import coil3.request.crossfade
 import coil3.request.ImageRequest
 import kotlin.math.min
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.time.Duration.Companion.milliseconds
 
 // Layout constants for main screen (single source of truth for row alignment and heights)
@@ -556,10 +557,14 @@ fun MainScreen(
             }
     }
 
-    // Backward-compatible list of standard MediaCategory values (used by existing navigation helpers)
-    val visibleCategories: List<MediaCategory> = allActiveRows
-        .filterIsInstance<ActiveRow.Standard>()
-        .map { it.category }
+    // Backward-compatible list of standard MediaCategory values (used by existing navigation helpers).
+    // Remembered so the rows section receives the same list instance and can skip recomposing
+    // when MainScreen recomposes for a focus change.
+    val visibleCategories: List<MediaCategory> = remember(allActiveRows) {
+        allActiveRows
+            .filterIsInstance<ActiveRow.Standard>()
+            .map { it.category }
+    }
     
     // Helper: navigate to a row from allActiveRows by index
     fun navigateToActiveRow(row: ActiveRow) {
@@ -957,7 +962,7 @@ fun MainScreen(
     }
 
     // Register MainScreen with the centralized DpadController
-    val dpadConfig = createMainScreenDpadConfig(
+    val dpadConfig = rememberStableDpadConfig(createMainScreenDpadConfig(
         route = "main",
         focusManager = appFocusManager,
         onUp = handleUp,
@@ -1037,7 +1042,7 @@ fun MainScreen(
                 }
             }
         }
-    )
+    ))
     
     // Register the screen configuration with the DpadController
     LaunchedEffect(dpadConfig) {
@@ -1279,83 +1284,48 @@ fun MainScreen(
                     "🔄 Request was made, refreshing RECENT_REQUESTS category"
                 )
 
-                // Critical: Explicitly block all key events during refresh
+                // Block key events until the refresh has landed. This waits for the refresh job
+                // itself; it used to wait a fixed 2 s "for the server" plus 1.5 s for the load
+                // (3.5 s with the D-pad dead) although Seerr saves a request before answering
+                // and the request handler already refreshed this row when it succeeded.
                 uiState.ignoreKeyEvents = true
+                val refresh = viewModel.refreshCategoryWithForce(MediaCategory.RECENT_REQUESTS)
 
                 coroutineScope.launch {
                     try {
-                        // Clear existing data - this is essential for a full refresh
-                        viewModel.clearCategoryData(MediaCategory.RECENT_REQUESTS)
-
-                        // Force reset pagination for the category
-                        viewModel.resetApiPagination(MediaCategory.RECENT_REQUESTS)
-
-                        Log.d(
-                            "MainScreen",
-                            "⏱️ Waiting briefly for server to update before fetching new data"
-                        )
-
-                        // Give the server more time to update its database
-                        // For new requests, allow ~2 seconds for backend processing
-                        delay(2000.milliseconds)
-
-                        // Force carousel reset first to clear any cached state
-                        viewModel.forceCarouselReset(MediaCategory.RECENT_REQUESTS, animate = true)
-
-                        // Clear image caches off main thread (disk eviction can ANR)
-                        withContext(Dispatchers.IO) {
-                            imageLoader.memoryCache?.clear()
-                            imageLoader.diskCache?.clear()
+                        // Capped at the old fixed wait: a slow or unreachable server must not
+                        // leave the remote dead. A refresh still running lands in the row later.
+                        if (withTimeoutOrNull(3500L) { refresh?.join(); true } == null) {
+                            Log.w("MainScreen", "RECENT_REQUESTS refresh still running after 3.5 s; re-enabling keys")
                         }
 
-                        // Now perform the refresh - this is similar to the full refresh logic but focused on one category
-                        viewModel.refreshCategoryWithForce(MediaCategory.RECENT_REQUESTS)
-
-                        // Allow sufficient time for the refresh to complete and data to load
-                        delay(1500.milliseconds)
-
-                        // Force a second carousel reset to ensure updated data is displayed
-                        viewModel.forceCarouselReset(MediaCategory.RECENT_REQUESTS, animate = true)
-
-                        // Reset the forced update counter to trigger UI update
+                        // Force a final UI update
                         forceUIUpdate()
 
-                        // Re-enable key events
-                        uiState.ignoreKeyEvents = false
+                        // If user is already on RECENT_REQUESTS, show the newest request first
+                        if (selectedCategory.value == MediaCategory.RECENT_REQUESTS) {
+                            val categoryResult = categoryData[MediaCategory.RECENT_REQUESTS]
+                            if (categoryResult is ApiResult.Success) {
+                                updateSelectedIndex(selectedCategory, selectedMediaIndex, 0, force = true)
+                                if (categoryResult.data.isNotEmpty()) {
+                                    mediaState.selectedMedia = categoryResult.data[0]
+                                }
+                                forceUIUpdate()
+                                Log.d("MainScreen", "🔄 Selection reset to show newest request")
+                            }
+                        }
 
                         Log.d("MainScreen", "✅ RECENT_REQUESTS refresh completed")
                     } catch (e: Exception) {
                         Log.e("MainScreen", "Error refreshing RECENT_REQUESTS: ${e.message}", e)
+                    } finally {
+                        // Re-enable key events
                         uiState.ignoreKeyEvents = false
                     }
                 }
 
                 // Clear the refresh required flag
                 viewModel.clearRefreshRequired()
-
-                // If user is already on RECENT_REQUESTS category, ensure selection remains valid
-                if (selectedCategory.value == MediaCategory.RECENT_REQUESTS) {
-                    coroutineScope.launch {
-                        // Wait for refresh to complete
-                        delay(2000.milliseconds)
-
-                        val categoryResult = categoryData[MediaCategory.RECENT_REQUESTS]
-                        if (categoryResult is ApiResult.Success) {
-                            // Reset to the first item (the newly added request should be here)
-                            updateSelectedIndex(selectedCategory, selectedMediaIndex, 0, force = true)
-
-                            // Update selected media with latest data
-                            if (categoryResult.data.isNotEmpty()) {
-                                mediaState.selectedMedia = categoryResult.data[0]
-                            }
-
-                            // Force a final UI update
-                            forceUIUpdate()
-
-                            Log.d("MainScreen", "🔄 Selection reset to show newest request")
-                        }
-                    }
-                }
             }
 
             // Force an immediate update based on the current selection
@@ -1746,12 +1716,22 @@ fun MainScreen(
             .focusRequester(mainFocusRequester)
             .focusable()
     ) {
-        // Backdrop with crossfade
+        // Backdrop with crossfade. The target is debounced: holding RIGHT used to start a
+        // full-screen w1280 download, decode and crossfade for every card passed. Now only the
+        // card focus settles on gets one; the first backdrop still shows immediately.
+        val backdropTarget = currentCategoryMedia ?: mediaState.selectedMedia // Use currentCategoryMedia first
+        var settledBackdrop by remember { mutableStateOf(backdropTarget) }
+        LaunchedEffect(backdropTarget) {
+            if (settledBackdrop != null) delay(BACKDROP_SETTLE_DELAY)
+            settledBackdrop = backdropTarget
+        }
         Crossfade(
-            targetState = currentCategoryMedia ?: mediaState.selectedMedia, // Use currentCategoryMedia first
+            targetState = settledBackdrop,
             modifier = Modifier.fillMaxSize(),
             label = ""
         ) { media -> MediaBackdrop(context, media, imageLoader) }
+        // Drawn once over the crossfade rather than inside each backdrop layer.
+        Box(modifier = Modifier.fillMaxSize().background(BackdropScrim))
 
         // Content: three regions – (1) Top bar in MainActivity, (2) Media details fixed height, (3) Rows fill rest
         Column(modifier = Modifier.fillMaxSize()) {
@@ -2030,11 +2010,20 @@ fun ScrollableCategoriesSection(
         removed.forEach { selectedMediaIndices.remove(it) }
     }
 
-    // Update the selected index for the current category
-    LaunchedEffect(categories, selectedCategory.value, selectedMediaIndex.value) {
+    // Copy the selected index into the current row's state during composition, so the row
+    // composed below already shows it in this frame (a LaunchedEffect did this one frame late).
+    // Like the effect it replaces, it copies only when the category, index or row list changes,
+    // so the carousel's own writes to that state (e.g. clearing it to -1) are not overwritten.
+    val lastCopiedSelection = remember { arrayOfNulls<Any>(3) }
+    run {
         val category = selectedCategory.value
-        val state = selectedMediaIndices.getOrPut(category) { mutableIntStateOf(0) }
-        state.value = selectedMediaIndex.value
+        val index = selectedMediaIndex.value
+        if (lastCopiedSelection[0] !== categories || lastCopiedSelection[1] != category || lastCopiedSelection[2] != index) {
+            lastCopiedSelection[0] = categories
+            lastCopiedSelection[1] = category
+            lastCopiedSelection[2] = index
+            selectedMediaIndices.getOrPut(category) { mutableIntStateOf(0) }.value = index
+        }
     }
     
     // Clear all media selections when entering top bar
@@ -2079,7 +2068,7 @@ fun ScrollableCategoriesSection(
                     is ActiveRow.Standard -> "std_${row.category.name}"
                     is ActiveRow.Custom -> "custom_${row.sliderId}"
                 }
-            }) { index, row ->
+            }, contentType = { _, row -> if (row is ActiveRow.Custom) 1 else 0 }) { index, row ->
                 when (row) {
                     is ActiveRow.Standard -> {
                         val category = row.category
@@ -2087,9 +2076,9 @@ fun ScrollableCategoriesSection(
 
                         val isCategoryCardType = isCategoryCardCategory(category)
                         val apiResult = if (isCategoryCardType) {
-                            categoryCardData[category] ?: ApiResult.Loading()
+                            categoryCardData[category] ?: ApiResult.Loading
                         } else {
-                            categoryData[category] ?: ApiResult.Loading()
+                            categoryData[category] ?: ApiResult.Loading
                         }
 
                         val shouldShowPlaceholder =
@@ -2120,7 +2109,7 @@ fun ScrollableCategoriesSection(
                         val sliderId = row.sliderId
                         val slider = discoverSliders.firstOrNull { it.id == sliderId }
                         val isSelected = sliderId == selectedCustomSliderId.value && !isInTopBar && !isOnAppsRow
-                        val sliderResult = customSliderData[sliderId] ?: ApiResult.Loading()
+                        val sliderResult = customSliderData[sliderId] ?: ApiResult.Loading
                         val title = slider?.title ?: SharedPreferencesUtil.getCustomSliderTitle(context, "custom_$sliderId") ?: "custom_$sliderId"
 
                         // Show placeholder on first load
@@ -2140,10 +2129,12 @@ fun ScrollableCategoriesSection(
                                 isInTopBar = isInTopBar,
                             )
                         }
-                        // Trigger loading when this slider appears and has no data yet
+                        // Trigger loading when this slider appears and has no data yet. Not
+                        // forced: loadDiscoverSliders usually has a load in flight already, and a
+                        // forced call bypassed the in-flight guard and fetched the slider twice.
                         LaunchedEffect(sliderId) {
                             if (customSliderData[sliderId] == null) {
-                                viewModel.loadCustomSlider(sliderId, forceRefresh = true)
+                                viewModel.loadCustomSlider(sliderId, forceRefresh = false)
                             }
                         }
                     }
@@ -2241,25 +2232,22 @@ fun MediaBackdrop(context: Context, media: Media?, imageLoader: ImageLoader) {
             )
         }
 
-        // Gradient overlay - always present
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    brush = Brush.verticalGradient(
-                        colors = listOf(
-                            Color(0xFF121827).copy(alpha = 0.5f),
-                            Color(0xFF121827).copy(alpha = 0.7f),
-                            Color(0xFF121827).copy(alpha = 0.9f),
-                            Color(0xFF121827)
-                        ),
-                        startY = 0f,
-                        endY = Float.POSITIVE_INFINITY
-                    )
-                )
-        )
+        // The gradient overlay is drawn by the caller, once, over the crossfade (BackdropScrim).
     }
 }
+
+private val BACKDROP_SETTLE_DELAY = 250.milliseconds
+
+private val BackdropScrim = Brush.verticalGradient(
+    colors = listOf(
+        Color(0xFF121827).copy(alpha = 0.5f),
+        Color(0xFF121827).copy(alpha = 0.7f),
+        Color(0xFF121827).copy(alpha = 0.9f),
+        Color(0xFF121827)
+    ),
+    startY = 0f,
+    endY = Float.POSITIVE_INFINITY
+)
 
 @Composable
 fun MediaDetailsArea(media: Media?, forceUpdate: Int = 0) {
@@ -2387,6 +2375,7 @@ fun CustomSliderSection(
                 is ApiResult.Error -> ErrorMediaRow()
                 is ApiResult.Success -> {
                     val items = apiResult.data
+                    val itemKeys = remember(items) { uniqueLazyKeys(items) { "${it.mediaType}_${it.id}" } }
                     if (items.isEmpty()) {
                         EmptyMediaRow()
                     } else {
@@ -2396,7 +2385,7 @@ fun CustomSliderSection(
                             contentPadding = PaddingValues(horizontal = 16.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            itemsIndexed(items) { idx, item ->
+                            itemsIndexed(items, key = { idx, _ -> itemKeys[idx] }) { idx, item ->
                                 val isItemSelected = isSelected && !isInTopBar && idx == selectedItemIndex
                                 ca.devmesh.seerrtv.ui.components.MediaCard(
                                     mediaContent = item,
@@ -2531,14 +2520,16 @@ fun CategoryCardComponent(
 ) {
     val cardHeight = 100.dp
     val cardWidth = 200.dp
-    val scale by animateFloatAsState(if (isSelected) 1.15f else 1f, label = "")
+    // State, not a delegated value: read inside graphicsLayer so the focus animation only
+    // redraws the layer each frame instead of recomposing the whole card.
+    val scale = animateFloatAsState(if (isSelected) 1.15f else 1f, label = "")
 
     Box(
         modifier =
             Modifier
                 .width(cardWidth)
                 .height(cardHeight)
-                .scale(scale)
+                .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
                 .clip(RoundedCornerShape(8.dp))
                 .background(
                     Color(0xFF1A1E24)

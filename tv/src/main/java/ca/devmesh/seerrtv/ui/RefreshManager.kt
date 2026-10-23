@@ -5,7 +5,6 @@ import android.util.Log
 import ca.devmesh.seerrtv.R
 import ca.devmesh.seerrtv.data.ApiResult
 import ca.devmesh.seerrtv.model.MediaDetails
-import ca.devmesh.seerrtv.SeerrTV
 import ca.devmesh.seerrtv.viewmodel.MediaCategory
 import ca.devmesh.seerrtv.viewmodel.SeerrViewModel
 
@@ -42,14 +41,8 @@ class RefreshManager {
         viewModel.clearCategoryData(MediaCategory.RECENT_REQUESTS)
         viewModel.resetApiPagination(MediaCategory.RECENT_REQUESTS)
         viewModel.refreshCategoryWithForce(MediaCategory.RECENT_REQUESTS)
-
-        try {
-            (context.applicationContext as? SeerrTV)?.clearImageCachesAsync()
-                ?: Log.w("RefreshManager", "Not SeerrTV application; skipping image cache clear")
-            Log.d("RefreshManager", "Scheduled image cache clear after request (IO)")
-        } catch (e: Exception) {
-            Log.w("RefreshManager", "Could not schedule cache clear: ${e.message}")
-        }
+        // No image cache clear here: a request changes no artwork (status badges are drawn,
+        // not images), and wiping the cache made every poster and backdrop download again.
     }
 
     fun handleAutoRequestSuccess(

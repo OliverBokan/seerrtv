@@ -1,0 +1,66 @@
+{
+  "before": [
+    {
+      "am_total_ms": 95,
+      "home_content_s": 13.07,
+      "frames": 581,
+      "deadline_missed": 7,
+      "p50_ms": 17,
+      "p90_ms": 21,
+      "p99_ms": 23,
+      "slow_ui_thread": 0
+    },
+    {
+      "am_total_ms": 88,
+      "home_content_s": 13.17,
+      "frames": 585,
+      "deadline_missed": 12,
+      "p50_ms": 17,
+      "p90_ms": 21,
+      "p99_ms": 36,
+      "slow_ui_thread": 4
+    },
+    {
+      "am_total_ms": 94,
+      "home_content_s": 13.08,
+      "frames": 582,
+      "deadline_missed": 8,
+      "p50_ms": 18,
+      "p90_ms": 22,
+      "p99_ms": 27,
+      "slow_ui_thread": 0
+    }
+  ],
+  "after": [
+    {
+      "am_total_ms": 100,
+      "home_content_s": 6.68,
+      "frames": 624,
+      "deadline_missed": 14,
+      "p50_ms": 17,
+      "p90_ms": 20,
+      "p99_ms": 36,
+      "slow_ui_thread": 4
+    },
+    {
+      "am_total_ms": 96,
+      "home_content_s": 6.71,
+      "frames": 635,
+      "deadline_missed": 9,
+      "p50_ms": 17,
+      "p90_ms": 19,
+      "p99_ms": 23,
+      "slow_ui_thread": 0
+    },
+    {
+      "am_total_ms": 75,
+      "home_content_s": 6.66,
+      "frames": 636,
+      "deadline_missed": 7,
+      "p50_ms": 16,
+      "p90_ms": 17,
+      "p99_ms": 18,
+      "slow_ui_thread": 0
+    }
+  ]
+}

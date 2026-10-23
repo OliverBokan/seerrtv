@@ -402,6 +402,9 @@
     <string name="filter_releaseDate">Releasedatum</string>
     <string name="filter_genres">Genres</string>
     <string name="filter_keywords">Trefwoorden</string>
+    <string name="filter_excludeKeywords">Trefwoorden uitsluiten</string>
+    <string name="filter_searchKeywords">Trefwoorden zoeken…</string>
+    <string name="filter_selectedCount">%1$d geselecteerd</string>
     <string name="filter_originalLanguage">Originele taal</string>
     <string name="filter_contentRating">Leeftijdsclassificatie</string>
     <string name="filter_runtime">Speelduur (minuten)</string>

@@ -18,6 +18,7 @@ object BrowseModels {
         val releaseTo: String? = null,    // YYYY-MM-DD format
         val genres: List<Int> = emptyList(),
         val keywords: List<Int> = emptyList(),
+        val excludeKeywords: List<Int> = emptyList(),
         val originalLanguage: String? = null,  // ISO 639-1 code (e.g., "en")
         val contentRatings: List<String> = emptyList(),  // e.g., ["PG", "PG-13"]
         val runtimeMin: Int? = null,  // minutes
@@ -49,6 +50,7 @@ object BrowseModels {
                     releaseTo == null &&
                     genres.isEmpty() &&
                     keywords.isEmpty() &&
+                    excludeKeywords.isEmpty() &&
                     originalLanguage == null &&
                     contentRatings.isEmpty() &&
                     runtimeMin == null &&
@@ -72,6 +74,7 @@ object BrowseModels {
             if (releaseFrom != null || releaseTo != null) count++
             if (genres.isNotEmpty()) count++
             if (keywords.isNotEmpty()) count++
+            if (excludeKeywords.isNotEmpty()) count++
             if (originalLanguage != null) count++
             if (contentRatings.isNotEmpty()) count++
             if (runtimeMin != null || runtimeMax != null) count++

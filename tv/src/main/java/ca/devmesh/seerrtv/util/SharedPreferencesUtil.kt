@@ -572,10 +572,20 @@ object SharedPreferencesUtil {
                 null
             }
 
+    // Every localized API call reads the profiles (getDiscoveryLanguage -> getActiveProfile), often
+    // on the main thread, and decoding the JSON each time added up to 40+ decodes per home load.
+    // The decoded list is kept for as long as the stored string is unchanged; profiles are
+    // immutable data classes, so sharing it is safe.
+    @Volatile
+    private var decodedProfiles: Pair<String, List<UserProfile>>? = null
+
     fun getProfiles(context: Context): List<UserProfile> {
         val sharedPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val json = sharedPrefs.getString(KEY_PROFILES_JSON, null) ?: return emptyList()
-        return decodeProfiles(json) ?: emptyList()
+        decodedProfiles?.let { (cachedJson, profiles) -> if (cachedJson == json) return profiles }
+        val profiles = decodeProfiles(json) ?: return emptyList()
+        decodedProfiles = json to profiles
+        return profiles
     }
 
     fun saveProfiles(context: Context, profiles: List<UserProfile>) {
@@ -1397,6 +1407,9 @@ object SharedPreferencesUtil {
     fun saveCustomSliderMeta(context: Context, categoryId: String, title: String, typeValue: Int, data: String?) {
         val sharedPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val encoded = "${title}|${typeValue}|${data ?: ""}"
+        // Called for every custom slider on every home load, on the main thread: skip the
+        // synchronous disk write when nothing changed.
+        if (sharedPrefs.getString(KEY_CUSTOM_SLIDER_META_PREFIX + categoryId, null) == encoded) return
         sharedPrefs.edit(commit = true) {
             putString(KEY_CUSTOM_SLIDER_META_PREFIX + categoryId, encoded)
         }

@@ -1,5 +1,346 @@
 # Changelog
 
+## 0.34.0
+
+### Added: Keyword filters show every pick, and keywords can be excluded
+
+- **Request** – A user asked whether keywords could be stacked when filtering. They already could: each keyword picked in the Movies or Series filter drawer was added to the list, and the request sent them all (`keywords=12377,322268`), so results had to match every one. But the drawer only marked a keyword as selected while it was in the current search results. After searching for a second keyword, the first pick disappeared from view even though it was still applied, and the only way to remove it was to search for it again.
+
+- **Change** –
+  - Selected keywords now appear as chips above the search field and stay there across searches, under an "N selected" label. Up from the search bar moves onto the chips, Left and Right move between them, Enter removes one, and Down returns to the search bar.
+  - New **Exclude Keywords** filter, below Keywords, for both Movies and Series. It sends `excludeKeywords=`, the same parameter as the Exclude Keywords filter in Seerr's web app. Its chips and check marks are red. A keyword can't be both required and excluded: picking it in one list removes it from the other.
+  - Multi-select filters in the drawer's category list show how many values are picked instead of a dot. This covers Keywords, Exclude Keywords, Genres, Content Rating, Networks and Streaming Services.
+  - `MediaFilters` still stores keyword IDs only, so `MediaDiscoveryViewModel` keeps a name for each keyword as it is picked. If filters come back with IDs it has no name for, it looks them up through Seerr's `keyword/{id}` endpoint.
+  - New strings for Exclude Keywords, the "N selected" label and the search placeholder, in all ten app languages. The placeholder was hard-coded English before.
+
+- **Verified** – On a Google TV emulator against a Seerr server, for Movies and Series: picking keywords across several searches keeps every chip. Removing a chip updates the results and clears its check mark. Reopening the Keywords screen still shows the chips, and Clear All Filters clears both lists. The requests carried both parameters (`keywords=193171,6282&excludeKeywords=297442`). The `keyword/{id}` name lookup only runs when filters are restored without names and was not exercised.
+
+### Fixed: Pressing Up from filter search results opened the keyboard
+
+- **Symptom** – In the Keywords, Studios and Original Language filters, pressing Up from the first result moved focus into the search field, and the on-screen keyboard opened. Getting anywhere else meant pressing Back to close it first.
+
+- **Root cause** – The results list moved focus straight to the text field when going up, and on Android TV a focused text field opens the keyboard. Leaving the field with the D-pad also cleared focus without moving it anywhere, so focus could end up off the drawer.
+
+- **Fix** – The search bar has its own focus target around the text field. Up from the results, and Down from the chips or the current selection, land on the bar without opening the keyboard. Only Enter on the bar starts typing. Leaving the text field with the D-pad returns focus to the bar.
+
+- **Fixed alongside** – In Studios and Original Language, picking a value adds a "Current Selection" row above the search bar and shifts every row below it down by one. Focus stayed on the list but the highlight moved to the search bar, and Up from the results did nothing. The index now shifts with the row. Clearing the selection moves focus to the search bar instead of the row that just went away.
+
+- **Verified** – On a Google TV emulator: in Keywords, Up from the results lands on the search bar with no keyboard, Up again reaches the chips, Down goes back through the bar to the results, and Enter on the bar opens the keyboard. In Studios: after picking Pixar the highlight stays on Pixar, Up reaches the bar and then Current Selection, and clearing it leaves focus on the bar. Original Language uses the same component but was not opened.
+
+### Fixed: Release builds ran all of the app's debug-only logging
+
+- **Symptom** – Release builds logged as much as debug builds did. In a debug build, 31 D-pad presses on the home screen produce about 1,470 log lines (142 KB) from the app, roughly 47 per press. Release builds did the same work on every key press: each message's string was built on the main thread, and one Back-press log captured a full stack trace. On a low-end TV box, that's main-thread time taken from scrolling.
+
+- **Root cause** – Two separate mistakes, one in each direction:
+  - `defaultConfig` in `tv/build.gradle.kts` declared its own `buildConfigField("Boolean", "DEBUG", "true")`, which replaced the `DEBUG` field AGP generates. Every build type, release included, got `DEBUG = true`, so all 396 `if (BuildConfig.DEBUG)` checks in the app passed in production.
+  - `SeerrViewModel.kt` imported `BuildConfig` from the YouTube player library instead of the app's own, since a March 2026 change. The library's `DEBUG` is `false`, so that file's debug logging was off in every build, debug included.
+
+- **Fix** –
+  - The `DEBUG` override is removed. Release now gets AGP's `DEBUG = false` as a compile-time constant, so the guarded blocks are compiled out of release builds entirely. Debug builds are unchanged.
+  - `SeerrViewModel` imports the app's `BuildConfig`, so its debug logs show in debug builds again.
+  - Two blocks behind that wrong import also called `updateCategoryState(...)` before loading more of a home row. Those calls haven't run in any build since March. They are removed rather than revived, which keeps the behaviour every release since then has shipped with. They only re-emitted the row's existing counts, which made every home row recompose for nothing.
+
+- **Verified** –
+  - Both build types compile.
+  - The generated `BuildConfig` has `DEBUG = false` in release and `true` in debug.
+  - In the release APK's dex, strings from guarded logs (`At end of media`, `Scroll incomplete`, `navigateBack() called`, `Route:`) are gone. Unguarded ones like `Loading category:` remain.
+  - Every `BuildConfig.DEBUG` block in the app was checked for code other than logging. Apart from the two `updateCategoryState` calls, they only build log messages, plus one empty `LaunchedEffect`.
+  - The before figure of about 1,470 lines was measured on a debug build. A release build was not installed to measure after the fix, because that would need a signed-in release install on the emulator.
+
+### Improved: The Recent Requests row fills in about 40% sooner
+
+- **Symptom** – On the home screen, Recent Requests was one of the last rows to show posters. On a cold start, the row had data about 5.5 s after home started loading, while the discover rows were ready within about 1 s.
+
+- **Root cause** – Seerr's `/request` list carries only TMDB IDs, so the row fetches `movie/{id}` or `tv/{id}` for every card to get its title and artwork. `fetchRecentRequests` wrapped each card's fetch in its own `coroutineScope { async { … } }`. `coroutineScope` waits for its children before returning, so the 20 fetches ran one after another, despite the `async`.
+
+- **Fix** – One `coroutineScope` around the whole list, an `async` per card, and `awaitAll()`, which keeps the request order. A `Semaphore` caps it at 4 fetches at a time (`CARD_DETAILS_CONCURRENCY`). That stays under OkHttp's default of 5 requests per host, so the other home rows loading at the same time still get a connection.
+
+- **Verified** – With `tools/perf` (a request-logging debug build) on a Google TV emulator against a Seerr server, alternating runs of the old and new builds, 4 each. Cold start: Recent Requests had data 3.29 s after home loading started, down from 5.55 s (−41%). Warm start: 3.25 s, down from 5.04 s (−36%). Same 73 API calls. The other rows were unaffected. Row order and the request action modal are unchanged. The test server has a single page of requests, so loading more was not exercised. The whole home screen still finishes at about the same time, because Recently Added fetches its cards' details one at a time as well. That row is next on the list.
+
+### Improved: The splash screen is shorter and opens home with its rows already filled
+
+- **Symptom** – Every launch spent about 6 s on the splash screen, mostly fixed pauses. Then home opened on placeholder cards that took several more seconds to fill.
+
+- **Root cause** –
+  - Each splash step paused after it was shown: 300 ms for an info step and 800 ms for a success step, on top of the work behind it. That was about 4.8 s per launch, plus a 300 ms and a 100 ms pause.
+  - Home only started loading its rows after the splash had closed.
+
+- **Fix** –
+  - **Step pacing:** each step stays on screen for a minimum time before the next one appears (300 ms for info, 600 ms for success), and the work behind it counts towards that time. Steps stay readable and in order, but a slow step adds no extra wait. Warnings still hold the splash for 2 s and errors for 5 s.
+  - **Home rows during the splash:** when the splash goes straight to home (no profile picker), the rows start loading as soon as Sonarr and Radarr have loaded, while the splash is still showing its results. `loadAllCategories()` no longer cancels a load that is still running unless a refresh was asked for. After "Ready!", the splash waits until the first home rows have data, for at most 3 s, so home opens filled.
+  - **No duplicate step:** a step identical to the one just shown is not repeated. The validation effect can restart once during startup.
+  - **Removed pauses:** the two other fixed pauses are gone.
+  - Sonarr and Radarr load concurrently, each with its servers in parallel, and the API client allows 8 requests per host instead of OkHttp's default 5.
+
+- **Verified** – On a Google TV emulator, cold start, from launch:
+  - The steps appeared one at a time, in order: Configuration, Connection, Authenticating, Loading Sonarr, Sonarr (green), Loading Radarr, Radarr (green), Plex detected (green), Ready!
+  - Every home row had data by 3.6 s, before "Ready!" at 4.2 s.
+  - Home opened at about 4.9 s with its rows filled.
+  - An earlier version that started the rows at the same time as Sonarr made Sonarr wait behind them (up to 2.6 s); starting them right after fixed that.
+  - Warning and error holds and the profile-picker path are unchanged and were not exercised.
+
+### Improved: The details screen polls less for titles with nothing in progress
+
+- **Symptom** – With a title's details open, the app polled Seerr every 30 s even when the title was fully available or had never been requested. Each poll makes Seerr fetch the title from TMDB. Each poll also cleared and refetched the Similar Titles row while a download was progressing.
+
+- **Fix** –
+  - Titles whose normal and 4K statuses both have nothing in progress (not requested, available, blocklisted or deleted) and that have no active download are polled every 2 minutes. Pending, processing and partially available titles stay at 30 s, and downloads at 15 s. A request made from the screen still refreshes it immediately.
+  - The Similar Titles fetch is keyed on the title's id and type instead of the whole details object.
+
+- **Verified** – Both build types compile. Polling intervals were not timed on the emulator.
+
+### Improved: Recently Added and Recent Requests fill in about 3.5× sooner, with 45% fewer API calls
+
+- **Symptom** – After every launch, the home screen made 72 API calls and downloaded about 2 MB of JSON before every row was filled. Recently Added and Recent Requests were the last rows, about 6 s after the others started loading.
+
+- **Root cause** – Both rows fetch `movie/{id}` or `tv/{id}` for every card, 34 calls on the test server, because Seerr's lists carry only TMDB IDs. Each of those calls is a TMDB fetch on the server. Running them in parallel didn't shorten the total, because each call got slower as more ran at once. Recently Added also ran its fetches one at a time.
+
+- **Fix** –
+  - Recently Added fetches its cards in parallel, like Recent Requests (above).
+  - Both rows share one in-flight fetch per title and one concurrency limit of 4.
+  - New `CardMetadataStore` keeps each card's title, artwork and overview for 24 hours, keyed by type, id and language. It is held in memory and in a JSON file in the cache directory. The file is read once and written after each row load, off the main thread, and is cleared when the server connection changes.
+  - Request and availability status still come from the live list on every load.
+
+- **Verified** – With `tools/perf` on a Google TV emulator, alternating 4 runs each against the build without the store. From the second launch onwards:
+  - API calls: 72 → **39**.
+  - JSON downloaded: 2,025 KB → **326 KB**.
+  - Per-card details calls: 34 → **1**.
+  - Both rows filled about **1.7 s** after home started loading, down from 6.1 s on a cold start; 1.7 s down from 5.5 s on a warm start.
+  - The first launch is unchanged: 72 calls, which then fill the file (about 15 KB).
+  - One duplicate per launch (a title in both rows) is gone.
+
+### Fixed: Home rows fetched their first page twice, and refreshing Upcoming skipped ahead
+
+- **Symptom** – Every launch fetched `/media` (Recently Added) and `/request` (Recent Requests) twice, and the real fetch waited for the throwaway one. After a request, refreshing the row repeated the pattern. Separately, refreshing an Upcoming row loaded its *next* page instead of the first, and rewound the matching Popular row.
+
+- **Root cause** – Pagination was "reset" by calling the list endpoint with `reset = true` and throwing the result away. `loadCategory` did that before its forced loads, as did `resetApiPagination` and `clearCategoryData`. Each caller then reloaded the row with `forceRefresh`, which passes `reset = true` and fetches page 1 itself. The Upcoming rows reset `discover/movies` / `discover/tv` but paginate under their full query (`…?primaryReleaseDateGte=<today>`), so their own cursor never reset and Popular's did.
+
+- **Fix** – These resets now only reset the pagination state, through `SeerrApiService.resetPaginationState`, with no network call. The Upcoming rows reset the key they actually paginate under (`upcomingMoviesEndpoint()` / `upcomingSeriesEndpoint()`).
+
+- **Verified** – With `tools/perf` on a Google TV emulator, alternating 3 runs each:
+  - API calls per launch: 39 → **37**.
+  - JSON: 326 → **269 KB**.
+  - Duplicate calls: 5 → **3**. The remaining ones are `/settings/public` and the watchlist membership check.
+  - Recently Added had data 0.62 s after home loading started (was 1.7 s); Recent Requests 0.57 s (was 1.4 s).
+  - No API errors, and both Upcoming rows loaded.
+  - The refresh after a request was not exercised: it needs a real request on the server.
+
+### Improved: Startup reads the server's public settings once instead of three times
+
+- **Symptom** – Every launch fetched `/settings/public` three times within a few seconds.
+
+- **Root cause** – Media-server detection and the content-visibility refresh (hide available / blocklisted) each fetched it after sign-in. `MainActivity` then ran media-server detection a second time.
+
+- **Fix** – `SeerrApiService.getPublicSettings()` shares one response for 30 s behind a mutex, and drops it whenever the server configuration changes. Both readers use it.
+
+- **Verified** – With `tools/perf`, alternating 2 runs each: API calls per launch 37 → **35**, duplicate calls 3 → **1**. The one left is the watchlist membership check. No API errors.
+
+### Fixed: Making a request made every poster and backdrop download again
+
+- **Symptom** – After a request was sent, the home screen reloaded the artwork for every row, including posters that hadn't changed. On a slow connection or a low-end box, the rows refilled slowly and the D-pad felt sluggish for a while afterwards.
+
+- **Root cause** – The request success path (`RefreshManager.handleRequestSuccess`) and the home screen's refresh after a request (`MainScreen`) both cleared Coil's whole memory **and** disk cache. Nothing about the artwork changes when a request is made: the request and availability badges on the cards are drawn by the app, not images. The clear dates back to before the open-source release, and nothing records why it was added.
+
+- **Fix** – Both clears are removed, along with the now-unused `SeerrTV.clearImageCachesAsync()`.
+
+- **Verified** – Both build types compile. No other code clears the image cache. This was not measured end to end: submitting a request on the test server can start real Sonarr/Radarr downloads.
+
+### Improved: Opening a title's details makes fewer, smaller requests
+
+- **Symptom** – Opening a movie made 4 API calls: details, ratings twice, and similar titles. On a slow device, the polling loop's first cycle then fetched details and ratings again, for 6 calls. The backdrop was TMDB's `original` image, often 4K and several megabytes, even though the TV shows it at 1080p behind a dark gradient. The person screen did the same for every backdrop it cycled through or focused.
+
+- **Root cause** –
+  - `fetchMovieDetails` fetched ratings itself. `fetchMediaDetails` then fetched them again through `getRatingsCached`, which missed because only `getRatingsCached` fills its cache. The ratings call goes through Seerr's slow RT/IMDb proxy and only started after the details had arrived.
+  - The polling loop's first cycle always fetched, even when the screen had fetched the same title a moment earlier. Its 1 s cooldown only covers the case where both happen together.
+  - The details and person backdrops requested `/t/p/original/`.
+
+- **Fix** –
+  - `fetchMovieDetails` returns details only, like `fetchTVDetails`, and drops its cache writes. Those stored minutes in a milliseconds field, so every entry was already expired when written.
+  - Ratings come only from `getRatingsCached`. They are fetched alongside the details instead of after them, and polling still reads them from the cache without fetching.
+  - The polling loop's first cycle reuses the screen's result when it is under 10 s old.
+  - Details and person backdrops use `w1280`, the size the home backdrop already uses. The details backdrop also shares the home backdrop's cache keys, so a title opened from home reuses the image already loaded there.
+
+- **Verified** – With `tools/perf` on a Google TV emulator, opening the first Recently Added movie:
+  - API calls: 4 → **3**, with no duplicate. On the slowed emulator, the build without the polling fix made 6 calls.
+  - Image downloads: 720 KB → **486 KB**, with no `original`-size image.
+  - TV details and the person screen were not part of the scripted run.
+
+### Improved: D-pad movement on the home rows does less work per press
+
+- **Symptom** – Every left/right press on a home row did more work than it needed to, which shows up as stutter on low-end TV boxes:
+  - It rebuilt both the card losing focus and the card gaining it, and the focus-zoom animation never actually played.
+  - It recomposed the whole card on every frame of the zoom.
+  - It started a new full-screen backdrop download and crossfade, even while the key was held.
+  - It drew the backdrop's gradient twice during the crossfade.
+
+- **Root cause** –
+  - The row's `LazyRow` keyed each card on its index *and whether it was selected*. A selection change therefore changed two keys, so Compose disposed those cards and built new ones. A freshly built `animateFloatAsState` starts at its target value, so there was nothing to animate.
+  - The zoom value was read during composition through `Modifier.scale`.
+  - `ApiResult.Loading` was a plain class, so each `ApiResult.Loading()` built during composition compared unequal to the last. Effects keyed on it restarted, including the carousel's load-more check.
+  - `visibleCategories` was rebuilt on every recomposition of the home screen, so the rows section could never skip.
+
+- **Fix** –
+  - Each card's key is its media type and id, deduplicated, and stays the same while the card stays in the row. `contentType` is set as well. The unused forced-recomposition keys are gone.
+  - The focus zoom on media cards, category cards and app tiles is applied in `graphicsLayer`, so the animation only redraws.
+  - `ApiResult.Loading` is a `data object`.
+  - `visibleCategories` is remembered.
+  - The home backdrop changes only after focus has rested on a card for 250 ms. The first backdrop still shows immediately.
+  - The gradient is drawn once, over the crossfade.
+
+- **Verified** – On a Google TV emulator:
+  - The home rows render with the backdrop and a single gradient.
+  - The focused card zooms with its border, and the backdrop follows focus once it rests.
+  - With 15 RIGHT presses sent back-to-back, as when a key is held, backdrop downloads went from 10–11 to **1**, and image traffic from 2.5 MB to **0.7 MB**.
+  - The slower scripted run, about 350 ms per press, still loads every backdrop, as intended.
+  - Frame timings from this session can't be compared: the emulator slowed to about 3 s per cold start for every build, old and new alike.
+
+### Improved: Less repeated work on the main thread
+
+- **Fix** –
+  - **Profiles:** the decoded profiles list is kept for as long as the stored JSON is unchanged. Every localized API call reads the active profile's language, often on the main thread, and each read used to decode the whole profiles JSON (40+ times per home load).
+  - **Custom sliders:** their saved title and type are only written when they changed. Every home load wrote them with a synchronous `commit()` on the main thread.
+  - **Image auth:** the Seerr origin used by the image auth interceptor is computed once per server configuration. Before, it was rebuilt with a fresh regex for every image request, TMDB ones included.
+
+- **Verified** – Both build types compile. A regression run of `tools/perf` loaded every home row and image, with no API errors.
+
+### Improved: Rows and grids redraw less, and the highlight keeps up with the D-pad
+
+- **Symptom** – A change to any home row, such as a page loading, a placeholder or a reset, recomposed every row on the screen. Each recomposition also rebuilt a string key from every item in the row. On the home rows and in the Discovery grid, the highlight landed one frame after each D-pad press.
+
+- **Root cause** –
+  - Each `EnhancedMediaCarousel` collected four ViewModel flows (`categoryStates`, `showPlaceholders`, `carouselResetEvents`, `carouselUpdates`) that hold state or events for *all* rows.
+  - The selected index was copied into each row's state, and into the grid's, inside a `LaunchedEffect`, which runs after the frame.
+  - Several lists had no item keys: cast and crew, Similar, Person screen credits, custom slider rows and the Discovery grid.
+
+- **Fix** –
+  - Each carousel reads those flows only through `derivedStateOf` slices for its own category, so other rows' changes no longer recompose it. The item content key is remembered per list.
+  - The home rows copy the selected index during composition, only when the category, index or row list changes, as the effect did. The Discovery grid compares cells against the selected row and column directly.
+  - A shared `uniqueLazyKeys` helper gives those lists stable keys from item ids, with a suffix on repeats, since duplicate keys crash a lazy list. The home carousel uses it too. The home rows column also sets `contentType`.
+
+- **Verified** – On a Google TV emulator:
+  - Home: right along a row, down to the next row and right again. The highlight moved each time, and no stale highlight was left on the row above.
+  - Details: Crew and Similar Movies rows.
+  - Person screen: Known For, three presses right.
+  - Discovery grid (Action): down, right, up. The highlight followed, and the grid kept the focused row at the top.
+  - No crashes. A `tools/perf` regression run loaded all rows with 35 API calls and no errors.
+  - Frame timings could not be compared because the host was overloaded.
+
+### Improved: Smaller fixes from the performance review
+
+- **Clock** – the top-bar clock kept a time value that changed every second, so it recomposed every second and re-read the 24-hour preference each time. It now keeps minute precision and wakes at the start of each minute.
+- **Home carousel** –
+  - It wrote to `ScrollPositionManager` during composition. That write now happens in a `SideEffect`, after the composition is applied.
+  - A `rowState` object and a `highestSuccessfulPosition` state were written on every press and scroll but never read. Both are removed.
+- **Media cards** –
+  - The image request for each poster and person photo is remembered per image path.
+  - The card gradients are shared constants instead of new brushes on every recomposition.
+  - The status icon's 80% alpha uses `CompositingStrategy.ModulateAlpha`, so it no longer renders through an offscreen layer on every card.
+- **Re-sign-in** – when a session expired, each request in flight ran its own login (a dozen at once while home rows load). Requests now share a single sign-in behind a mutex. A counter of completed sign-ins tells a request whether another one already signed in after it was sent, and if so it reuses that session. (Comparing the token itself didn't work: any response that sets a session or CSRF cookie, including the 401, replaces it, so the sign-in could be skipped and the request fail again.)
+- **Connect timeout** – down from 30 s to 10 s, so an unreachable server no longer holds each splash step for 30 s. Read and request timeouts are unchanged.
+- **Unused dependency** – `androidx.tv:tv-foundation` is removed; nothing imported it.
+- **Discovery images** – two keyword-header images in Discovery now use the app's image loader. Without it, Coil built a second default loader with its own caches.
+- **Studio and network logos** – the six details on each page of the Studios and Networks rows load in parallel instead of one after another. Their caches are now thread-safe maps.
+- **Custom sliders** – a custom slider row's first load no longer forces a second fetch while `loadDiscoverSliders` is already loading it.
+- **Tooling** – Compose compiler reports can be generated with `-PcomposeReports=true` (see `tv/build.gradle.kts`). They show every app composable is skippable with strong skipping, and only 157 of about 13,800 arguments unstable, so no stability configuration was added.
+- **Verified** –
+  - Both build types build, including the R8 release build.
+  - On a Google TV emulator, the clock rolled over to the next minute within 2 s.
+  - Cards render with their status badges and backgrounds.
+  - A `tools/perf` run loaded all rows and 14 images with 35 API calls and no errors.
+  - The session-expiry path and the 10 s timeout were not exercised.
+
+### Improved: A D-pad press no longer recomposes the whole app
+
+- **Symptom** – Every D-pad move anywhere in the app recomposed the app's root (`setContent` in `MainActivity`) and the top-bar controller. It also rebuilt and re-registered the home, top-bar and details screens' D-pad configurations.
+
+- **Root cause** –
+  - Each D-pad move replaces `AppFocusManager.currentFocus`. The root read it directly to build the top-bar flags, and `TopBarController` keyed an effect on it, so both recomposed on every press.
+  - Screens build their `ScreenDpadConfig` inline, with fresh lambdas and transition maps, so `LaunchedEffect(config)` saw a new config on every recomposition and registered the screen again.
+
+- **Fix** –
+  - The root and `TopBarController` read only which top-bar element is focused, through `derivedStateOf`, so they recompose only when that changes.
+  - New `rememberStableDpadConfig()` returns one config object per screen whose callbacks forward to the latest handlers. Home, the top bar and the details screen use it.
+  - `MainScreen` still recomposes on each press, because the title and overview at the top follow the selection.
+
+- **Verified** – On a Google TV emulator:
+  - along and down the home rows;
+  - Up into the top bar (Search highlighted with its label and the refresh hint);
+  - Left to Movies, then Down back to the rows, landing on the same card as the previous build;
+  - on the search screen, Up lands on Settings (Search is hidden there), as before.
+
+### Fixed: Holding a direction on a home row could make it jump back
+
+- **Symptom** – Holding Left or Right on a home row, or pressing quickly, could make the row stutter or snap back to an earlier position while it was still scrolling to the newest card.
+
+- **Root cause** – Every press started a new scroll job for the carousel, wrapped in `NonCancellable`. When a newer press began its animation, the older job's animation was cancelled. But `safeScrollToItem` caught that cancellation as an ordinary error and carried on: 50 ms later the old job ran its "off-screen" safety check and could jump the row instantly, fighting the newer animation.
+
+- **Fix** – The carousel keeps the latest selection's scroll job and cancels it when the next selection arrives. `NonCancellable` is removed from the selection scroll and from `safeScrollToItem`, which now rethrows cancellation. The scroll positions and rules themselves are unchanged.
+
+- **Verified** – On a Google TV emulator, 15 Right presses sent back-to-back moved the selection to the 16th card in the usual slot. A second screenshot 2 s later showed it in the same place, with no jump back. Moving Left one card scrolled the row by one with the selection in the same slot.
+
+### Improved: The filters drawer opens without reloading its lists
+
+- **Symptom** – Every time the Movies or Series filters drawer opened, it fetched the regions, languages, genres and streaming providers again, one after another, and the Streaming Services screen fetched the providers a second time. Provider logos were downloaded at TMDB's `w500` size for a 60 dp tile.
+
+- **Fix** –
+  - `MediaDiscoveryViewModel` keeps these lists for the session. Regions and languages are fetched once, in parallel. Genres are cached per media type and language, and providers per media type and region.
+  - Reopening the drawer still starts the language search from the full list.
+  - Provider logos use `w154`, the smallest TMDB size that covers 60 dp at 1080p.
+
+- **Verified** – On a Google TV emulator, in Movies:
+  - The first drawer open made 4 requests (regions, languages, genres, providers); the second made none.
+  - The Genres screen listed every genre from the cache.
+  - Streaming Services made no API call and showed its 20 logos at `w154`.
+
+### Improved: Coming back from making a request no longer freezes the D-pad for 3.5 s
+
+- **Symptom** – After making a request, returning to the home screen blocked all D-pad input for about 3.5 s while Recent Requests refreshed. Several code paths each started their own forced refresh of that row.
+
+- **Root cause** –
+  - Home's refresh on return waited a fixed 2 s "for the server", then started the refresh, then waited a fixed 1.5 s for it, with key events ignored throughout. Seerr saves a request before it answers, and the request handler had already refreshed the row when the request succeeded.
+  - `refreshCategoryWithForce` only launched the load, then guessed with a fixed 500 ms delay before checking whether the row was empty.
+  - The request handler, the request view model and home on return each started a separate forced refresh.
+
+- **Fix** –
+  - `refreshCategoryWithForce` waits for the load itself and returns its job.
+  - If a forced refresh of the category is already running, at most one more run is queued after it.
+  - Home blocks keys only until that job finishes, with no fixed waits, and for at most 3.5 s (the old fixed wait) so a slow or unreachable server can't leave the remote dead. A refresh that runs longer still fills in the row when it lands. It then moves the selection to the newest request, as before.
+
+- **Verified** – On a Google TV emulator against a Seerr server, with a request for an unreleased title (Spider-Man: Beyond the Spider-Verse, June 2027), removed again afterwards:
+  - **Request:** the POST took 0.5 s. Recent Requests was refreshed with the new title first after 1.55 s, from one `/request` call plus that title's details, and one queued rerun followed.
+  - **Return to home from details:** the refresh finished in 0.46 s with one `/request` call. Two D-pad presses sent 0.5 s and 0.75 s after Back both moved the selection; before, input was ignored for about 3.5 s.
+  - **Remove from Radarr** (`DELETE /media/{id}` and `/media/{id}/file`): the row was correct again after 2.75 s, from three `/request` calls and no card-details calls.
+  - The original flow, per the review, made about 7 `/request` calls and 40–60 card-details calls after a request.
+
+### Improved: The baseline profile now covers the screens people actually use
+
+- **Symptom** – The baseline profile shipped since 0.31.0 was recorded on a device whose home screen never got past its loading placeholders. It contained `MediaCardPlaceholder`, but no media card, carousel, details, browse or Discovery code. So the code behind the first home scroll and the first screens opened ran interpreted on every install. Its startup profile was also a byte-for-byte copy of the full profile, which defeats the dex layout it is meant to drive.
+
+- **Fix** – The generator (`baselineprofile/…/StartupBaselineProfileGenerator.kt`) now has two tests. Both wait for real media posters on screen rather than for "idle".
+  - **`startup`** records launch up to the first posters, and is the only input to the startup profile.
+  - **`journeys`** records three journeys, each from a fresh launch: scrolling the home rows; opening a title's details and scrolling to cast and similar titles; and browsing Movies.
+  - D-pad input only, so nothing is changed on the server. It was regenerated on the Google TV emulator, signed in to a Seerr server.
+
+- **Verified** – The new profile has 33,472 rules (was 24,200), including:
+  - 102 for `MediaCardKt`, 142 for `EnhancedMediaCarouselKt` and 84 for `CarouselComponentsKt`;
+  - 224 for `MediaDetailsKt`, 199 for `MediaBrowseScreenKt` and 47 for `DiscoveryGridKt`.
+
+  The previous profile had none of these. The startup profile is now separate (28,079 rules). The run was pinned to the emulator with `ANDROID_SERIAL`; the attached phone was untouched. Profiles take effect only in release builds, so the debug-build measurements in `tools/perf` do not show this change. A release comparison (`tools/perf/release_compare.py`: `benchmarkRelease` with `speed-profile`, 0.33.0 against 0.34.0, 3 alternating rounds) measured home showing media cards 13.1 s → 6.7 s after launch, and D-pad scroll p90 / p99 frames 21 / 27 ms → 19 / 23 ms. That covers all of 0.34.0's changes together, not the profile on its own.
+
+### Improved: Large debug dumps no longer run in release builds
+
+- **Symptom** – Every details open and every polling cycle converted whole objects to text for logging: full TV details (cast, crew, seasons), media details and ratings results. Release builds did this on the main thread.
+
+- **Fix** – These five logs in `SeerrViewModel` and `SeerrApiService` are behind `BuildConfig.DEBUG`. Since the `DEBUG` fix above, release builds compile them out.
+
+- **Verified** – Both build types compile.
+
+### Changed: Dependency updates
+
+- Removed `androidx.tv:tv-foundation` 1.0.0. Nothing in the app used it.
+
+No other dependency versions changed.
+
 ## 0.33.0
 
 ### Fixed: A cancelled request could show up as "Error loading media"

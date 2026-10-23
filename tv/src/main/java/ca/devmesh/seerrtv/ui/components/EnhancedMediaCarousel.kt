@@ -30,7 +30,9 @@ import ca.devmesh.seerrtv.viewmodel.MediaCategory
 import ca.devmesh.seerrtv.viewmodel.SeerrViewModel
 import kotlin.math.abs
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.time.Duration.Companion.milliseconds
@@ -71,8 +73,9 @@ fun <T> EnhancedMediaCarousel(
     // Debounce time in milliseconds
     val debounceTime = 200L
 
-    // Track highest successful scroll position for CategoryCards
-    val highestSuccessfulPosition = remember { mutableIntStateOf(3) }
+    // The scroll started for the latest selection (cancelled when the next one arrives)
+    val selectionScrollJob = remember { arrayOfNulls<Job>(1) }
+
 
     // Category key for position storage
     val categoryKey = category.name
@@ -99,13 +102,17 @@ fun <T> EnhancedMediaCarousel(
         }
     }
     
-    // Get the category state from the ViewModel
-    val categoryStates by viewModel.categoryStates.collectAsStateWithLifecycle()
-    val categoryState = categoryStates[category]
-    
+    // These ViewModel flows hold every row's entry (or the latest event for any row). Each is
+    // collected as a State but only read inside derivedStateOf, which picks this row's slice,
+    // so a change to another row no longer recomposes this one.
+    val categoryStatesState = viewModel.categoryStates.collectAsStateWithLifecycle()
+    val categoryState by remember(category) { derivedStateOf { categoryStatesState.value[category] } }
+
     // Get placeholder visibility from the ViewModel
-    val showPlaceholders by viewModel.showPlaceholders.collectAsStateWithLifecycle()
-    val shouldShowPlaceholder = showPlaceholders[category] == true
+    val showPlaceholdersState = viewModel.showPlaceholders.collectAsStateWithLifecycle()
+    val shouldShowPlaceholder by remember(category) {
+        derivedStateOf { showPlaceholdersState.value[category] == true }
+    }
 
     // Track old data size for proper placeholder positioning
     val oldDataSize = remember(category.name) { mutableIntStateOf(0) }
@@ -116,8 +123,11 @@ fun <T> EnhancedMediaCarousel(
     // Track if a reset was recently performed to avoid overriding with saved position
     val wasResetPerformed = remember { mutableStateOf(false) }
     
-    // Listen for carousel reset events from ViewModel
-    val resetEvent by viewModel.carouselResetEvents.collectAsStateWithLifecycle()
+    // Listen for carousel reset events from ViewModel (only this row's)
+    val resetEventsState = viewModel.carouselResetEvents.collectAsStateWithLifecycle()
+    val resetEvent by remember(category) {
+        derivedStateOf { resetEventsState.value?.takeIf { it.first == category } }
+    }
     
     // Remember the scroll position and derive state from it
     val scrollPosition = remember(scrollState) {
@@ -142,9 +152,10 @@ fun <T> EnhancedMediaCarousel(
     }
     
     /**
-     * Helper function to perform a scroll operation safely with better error handling
-     * for mutation interruptions. Uses withContext(NonCancellable) to ensure the operation
-     * completes even if the parent coroutine is canceled.
+     * Helper function to perform a scroll operation safely with better error handling.
+     * Cancellable: a newer selection cancels the scroll it supersedes (see selectionScrollJob).
+     * It used to run in NonCancellable and swallow cancellation, so an older scroll carried on
+     * after a newer one had started and the two fought (rubber-banding when a key was held).
      * 
      * @param targetPosition The position to scroll to
      * @param logTag A tag for logging to indicate what triggered the scroll
@@ -175,53 +186,19 @@ fun <T> EnhancedMediaCarousel(
                 )
             }
             
-            // Perform the scroll operation with non-cancellable context
-            withContext(kotlinx.coroutines.NonCancellable) {
-                try {
-                    withContext(Dispatchers.Main.immediate) {
-                        if (animated) {
-                            // Use animated scrolling for smoother transition
-                            coroutineScope.launch {
-                                // Calculate animation duration based on scroll distance for more natural-feeling animation
-                                // (longer distance = slightly longer duration, but capped to avoid too slow scrolling)
-                                val distance =
-                                    abs(targetPosition - scrollState.firstVisibleItemIndex)
-                                val baseDuration = 300 // Base duration in milliseconds
-                                val maxDuration = 600 // Maximum duration in milliseconds
-                                
-                                // Scale duration between base and max based on distance
-                                val duration = (baseDuration + (distance * 40)).coerceAtMost(maxDuration)
-                                
-                                if (BuildConfig.DEBUG) {
-                                    Log.d(
-                                        "MediaCarousel",
-                                        "$logTag ${category.name}: Animated scroll with duration ${duration}ms (distance: $distance)"
-                                    )
-                                }
-                                
-                                // Use standard animation API that's available for LazyListState
-                                scrollState.animateScrollToItem(targetPosition)
-                            }.join()
-                        } else {
-                            // Use instant scrolling
-                            scrollState.scrollToItem(targetPosition)
-                        }
-                    }
-                    
-                    // If we're not at the target and not using animation, try once more
-                    if (!animated && scrollState.firstVisibleItemIndex != targetPosition) {
-                        delay(50.milliseconds)
-                        withContext(Dispatchers.Main.immediate) {
-                            scrollState.scrollToItem(targetPosition)
-                        }
-                    }
-                } catch (e: Exception) {
-                    if (BuildConfig.DEBUG) {
-                        Log.e(
-                            "MediaCarousel",
-                            "$logTag ${category.name}: Scroll failed: ${e.message}"
-                        )
-                    }
+            withContext(Dispatchers.Main.immediate) {
+                if (animated) {
+                    scrollState.animateScrollToItem(targetPosition)
+                } else {
+                    scrollState.scrollToItem(targetPosition)
+                }
+            }
+
+            // If we're not at the target and not using animation, try once more
+            if (!animated && scrollState.firstVisibleItemIndex != targetPosition) {
+                delay(50.milliseconds)
+                withContext(Dispatchers.Main.immediate) {
+                    scrollState.scrollToItem(targetPosition)
                 }
             }
             
@@ -232,6 +209,9 @@ fun <T> EnhancedMediaCarousel(
                     "$logTag ${category.name}: Scroll incomplete - reached ${scrollState.firstVisibleItemIndex} instead of $targetPosition"
                 )
             }
+        } catch (e: CancellationException) {
+            // Superseded by a newer scroll: stop here instead of carrying on
+            throw e
         } catch (e: Exception) {
             if (BuildConfig.DEBUG) {
                 Log.e(
@@ -331,29 +311,9 @@ fun <T> EnhancedMediaCarousel(
         }
     }
 
-    // Simplified state object - removing complex timing and placeholder state
-    val rowState = remember {
-        object {
-            // Force update trigger for recomposition
-            val forceUpdate = mutableIntStateOf(0)
-
-            // Track composition state
-            var isActive by mutableStateOf(true)
-
-            // Preserve selected index during recompositions
-            var lastSelectedIndex by mutableIntStateOf(selectedIndex.value)
-        }
-    }
-
-    // Track composition state using DisposableEffect
+    // Store the scroll position when the row leaves composition
     DisposableEffect(category.name) {
-        // Set active when entering composition
-        rowState.isActive = true
-
-        // Set inactive when leaving composition
         onDispose {
-            rowState.isActive = false
-
             // Store scroll position on disposal
             if (scrollState.firstVisibleItemIndex > 0 || scrollState.firstVisibleItemScrollOffset > 0) {
                 ScrollPositionManager.positions[categoryKey] = Pair(
@@ -371,8 +331,11 @@ fun <T> EnhancedMediaCarousel(
         }
     }
 
-    // React to carousel updates from the ViewModel
-    val carouselUpdate by viewModel.carouselUpdates.collectAsStateWithLifecycle()
+    // React to carousel updates from the ViewModel (only this row's)
+    val carouselUpdatesState = viewModel.carouselUpdates.collectAsStateWithLifecycle()
+    val carouselUpdate by remember(category) {
+        derivedStateOf { carouselUpdatesState.value?.takeIf { it.category == category } }
+    }
 
     // COMBINED EFFECT: Unified carousel update and selection handler
     LaunchedEffect(
@@ -465,129 +428,128 @@ fun <T> EnhancedMediaCarousel(
 
                 // First, update state variables
                 selectedIndex.value = savedIndex
-                rowState.lastSelectedIndex = savedIndex
                 lastScrolledIndex.intValue = -1
-                highestSuccessfulPosition.intValue = 3
 
-                // Then handle scroll position
-                coroutineScope.launch {
-                    withContext(kotlinx.coroutines.NonCancellable) {
-                        try {
-                            // Get current scroll position
-                            val currentScrollPosition = scrollState.firstVisibleItemIndex
+                // Then handle scroll position. Only the latest selection's scroll runs: the one
+                // for the previous press is cancelled, including its delayed safety check, which
+                // otherwise jumped the row back while the newer animation was still running.
+                selectionScrollJob[0]?.cancel()
+                selectionScrollJob[0] = coroutineScope.launch {
+                    try {
+                        // Get current scroll position
+                        val currentScrollPosition = scrollState.firstVisibleItemIndex
                             
-                            // Previously, only right navigation would maintain scroll position,
-                            // but we should maintain scroll position for BOTH left and right
-                            // Skip the directional check entirely and always maintain position
+                        // Previously, only right navigation would maintain scroll position,
+                        // but we should maintain scroll position for BOTH left and right
+                        // Skip the directional check entirely and always maintain position
                             
-                            val categoryKey = "${category.name}_index"
-                            val directionText = if (ScrollPositionManager.isNavigatingRight(categoryKey)) "RIGHT" else "LEFT"
+                        val categoryKey = "${category.name}_index"
+                        val directionText = if (ScrollPositionManager.isNavigatingRight(categoryKey)) "RIGHT" else "LEFT"
                             
+                        if (BuildConfig.DEBUG) {
+                            Log.d(
+                                "MediaCarousel",
+                                "🚀 ${category.name}: Maintaining scroll position $currentScrollPosition during $directionText navigation"
+                            )
+                        }
+                                
+                        // Calculate target position based on current scroll
+                        val targetPosition = calculateOptimalScrollPosition(
+                            index = savedIndex,
+                            isCategoryCard = itemType == "CategoryCard",
+                            totalItems = items.size,
+                            scrollState = scrollState,
+                            category = category
+                        )
+                                
+                        // Only scroll if we need to adjust position
+                        if (targetPosition != currentScrollPosition) {
+                            // Don't call performScrollIfNeeded because it will recalculate the position
+                            // Instead, scroll directly to the calculated position
+                            safeScrollToItem(
+                                targetPosition = targetPosition,
+                                logTag = "PostNavigation"
+                            )
+                        }
+                                
+                        // SAFETY CHECK - Verify the selected item is visible after navigation
+                        // This helps with rapid navigation where animations might not keep up
+                        delay(50.milliseconds) // Brief delay to let any running animations progress
+                            
+                        // Calculate position information
+                        val positionOnScreen = savedIndex - scrollState.firstVisibleItemIndex + 1
+                        val maxVisibleItems = if (itemType == "CategoryCard") 4 else 6
+                        val isOffScreen = positionOnScreen !in 1..maxVisibleItems
+                            
+                        // Check key conditions based on simplified rules
+                        val isFirstCardInPosition1 = scrollState.firstVisibleItemIndex == 0
+                        val isLastCardInPosition6 = savedIndex == items.size - 1 && 
+                                                  (positionOnScreen == 6 || (items.size <= 6 && positionOnScreen == items.size))
+
+                        // Emergency handling for off-screen items
+                        if (isOffScreen) {
                             if (BuildConfig.DEBUG) {
                                 Log.d(
                                     "MediaCarousel",
-                                    "🚀 ${category.name}: Maintaining scroll position $currentScrollPosition during $directionText navigation"
+                                    "⚠️ ${category.name}: SAFETY CHECK - Item off screen (pos=$positionOnScreen), fixing position"
                                 )
                             }
                                 
-                            // Calculate target position based on current scroll
-                            val targetPosition = calculateOptimalScrollPosition(
-                                index = savedIndex,
-                                isCategoryCard = itemType == "CategoryCard",
-                                totalItems = items.size,
-                                scrollState = scrollState,
-                                category = category
-                            )
+                            // Determine proper position based on our simplified rules
+                            val emergencyTargetPosition: Int
                                 
-                            // Only scroll if we need to adjust position
-                            if (targetPosition != currentScrollPosition) {
-                                // Don't call performScrollIfNeeded because it will recalculate the position
-                                // Instead, scroll directly to the calculated position
-                                safeScrollToItem(
-                                    targetPosition = targetPosition,
-                                    logTag = "PostNavigation"
-                                )
-                            }
-                                
-                            // SAFETY CHECK - Verify the selected item is visible after navigation
-                            // This helps with rapid navigation where animations might not keep up
-                            delay(50.milliseconds) // Brief delay to let any running animations progress
-                            
-                            // Calculate position information
-                            val positionOnScreen = savedIndex - scrollState.firstVisibleItemIndex + 1
-                            val maxVisibleItems = if (itemType == "CategoryCard") 4 else 6
-                            val isOffScreen = positionOnScreen !in 1..maxVisibleItems
-                            
-                            // Check key conditions based on simplified rules
-                            val isFirstCardInPosition1 = scrollState.firstVisibleItemIndex == 0
-                            val isLastCardInPosition6 = savedIndex == items.size - 1 && 
-                                                      (positionOnScreen == 6 || (items.size <= 6 && positionOnScreen == items.size))
-
-                            // Emergency handling for off-screen items
-                            if (isOffScreen) {
+                            if (itemType != "CategoryCard" && isFirstCardInPosition1) {
+                                // RULE 1: If first card is in position 1, keep at start
+                                emergencyTargetPosition = 0
                                 if (BuildConfig.DEBUG) {
                                     Log.d(
                                         "MediaCarousel",
-                                        "⚠️ ${category.name}: SAFETY CHECK - Item off screen (pos=$positionOnScreen), fixing position"
+                                        "📌 ${category.name}: Applying RULE 1 - First card in position 1, keeping at start"
                                     )
                                 }
-                                
-                                // Determine proper position based on our simplified rules
-                                val emergencyTargetPosition: Int
-                                
-                                if (itemType != "CategoryCard" && isFirstCardInPosition1) {
-                                    // RULE 1: If first card is in position 1, keep at start
-                                    emergencyTargetPosition = 0
-                                    if (BuildConfig.DEBUG) {
-                                        Log.d(
-                                            "MediaCarousel",
-                                            "📌 ${category.name}: Applying RULE 1 - First card in position 1, keeping at start"
-                                        )
-                                    }
-                                } else if (isLastCardInPosition6) {
-                                    // RULE 2: If last card is in position 6, keep at end
-                                    val maxScrollPosition = (items.size - maxVisibleItems).coerceAtLeast(0)
-                                    emergencyTargetPosition = maxScrollPosition
-                                    if (BuildConfig.DEBUG) {
-                                        Log.d(
-                                            "MediaCarousel",
-                                            "📌 ${category.name}: Applying RULE 2 - Last card in position 6, setting to end"
-                                        )
-                                    }
-                                } else {
-                                    // RULE 3: Default - center card at position 3
-                                    val centerPosition = if (itemType == "CategoryCard") 2 else 2  // Position 3
-                                    val idealPosition = (savedIndex - centerPosition).coerceAtLeast(0)
-                                    val maxScrollPosition = (items.size - maxVisibleItems).coerceAtLeast(0)
-                                    emergencyTargetPosition = idealPosition.coerceAtMost(maxScrollPosition)
-                                    if (BuildConfig.DEBUG) {
-                                        Log.d(
-                                            "MediaCarousel",
-                                            "📌 ${category.name}: Applying RULE 3 - Centering card at position 3 (scroll=$emergencyTargetPosition)"
-                                        )
-                                    }
+                            } else if (isLastCardInPosition6) {
+                                // RULE 2: If last card is in position 6, keep at end
+                                val maxScrollPosition = (items.size - maxVisibleItems).coerceAtLeast(0)
+                                emergencyTargetPosition = maxScrollPosition
+                                if (BuildConfig.DEBUG) {
+                                    Log.d(
+                                        "MediaCarousel",
+                                        "📌 ${category.name}: Applying RULE 2 - Last card in position 6, setting to end"
+                                    )
                                 }
+                            } else {
+                                // RULE 3: Default - center card at position 3
+                                val centerPosition = if (itemType == "CategoryCard") 2 else 2  // Position 3
+                                val idealPosition = (savedIndex - centerPosition).coerceAtLeast(0)
+                                val maxScrollPosition = (items.size - maxVisibleItems).coerceAtLeast(0)
+                                emergencyTargetPosition = idealPosition.coerceAtMost(maxScrollPosition)
+                                if (BuildConfig.DEBUG) {
+                                    Log.d(
+                                        "MediaCarousel",
+                                        "📌 ${category.name}: Applying RULE 3 - Centering card at position 3 (scroll=$emergencyTargetPosition)"
+                                    )
+                                }
+                            }
                                 
-                                // Force immediate (non-animated) scroll to ensure visibility
-                                safeScrollToItem(
-                                    targetPosition = emergencyTargetPosition,
-                                    logTag = "EmergencySafety",
-                                    animated = false // Use instant scroll for emergency correction
-                                )
-                            }
+                            // Force immediate (non-animated) scroll to ensure visibility
+                            safeScrollToItem(
+                                targetPosition = emergencyTargetPosition,
+                                logTag = "EmergencySafety",
+                                animated = false // Use instant scroll for emergency correction
+                            )
+                        }
 
-                            // Mark that we've handled the scroll for this selection
-                            hasScrolledForSelection.value = true
+                        // Mark that we've handled the scroll for this selection
+                        hasScrolledForSelection.value = true
                             
-                        } catch (e: Exception) {
-                            if (BuildConfig.DEBUG) {
-                                Log.e("MediaCarousel", "⚠️ ${category.name}: Navigation scroll failed: ${e.message}")
-                            }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        if (BuildConfig.DEBUG) {
+                            Log.e("MediaCarousel", "⚠️ ${category.name}: Navigation scroll failed: ${e.message}")
                         }
                     }
                 }
-                
-                rowState.forceUpdate.intValue++
             }
 
             // PART 3: Handle auto-loading
@@ -713,7 +675,6 @@ fun <T> EnhancedMediaCarousel(
                 
                 if (isCategoryCarousel) {
                     lastScrolledIndex.intValue = -1
-                    highestSuccessfulPosition.intValue = 3
                     
                     if (wasAtEndOfList && items.isNotEmpty()) {
                         if (BuildConfig.DEBUG) {
@@ -1005,16 +966,35 @@ fun <T> EnhancedMediaCarousel(
 
     // Snapshot row content (not just size + first item) so later items can update when the
     // first row is unchanged — e.g. watchlist refresh or TMDB id normalization.
-    val rowItemsContentKey = rowItems.mapIndexed { index, item ->
-        when (item) {
-            is Media -> "${item.id}:${item.tmdbId}:${item.mediaType}@$index"
-            is CategoryCard -> "${item.id}:${item.name}@$index"
-            is CarouselPlaceholderItem -> "ph@$index"
-            else -> "${item.hashCode()}@$index"
-        }
-    }.joinToString("|")
+    // Rebuilt only when the row's list changes, not on every recomposition (it joins every
+    // item into one string, and rows grow as they paginate).
+    val rowItemsContentKey = remember(rowItems) {
+        rowItems.mapIndexed { index, item ->
+            when (item) {
+                is Media -> "${item.id}:${item.tmdbId}:${item.mediaType}@$index"
+                is CategoryCard -> "${item.id}:${item.name}@$index"
+                is CarouselPlaceholderItem -> "ph@$index"
+                else -> "${item.hashCode()}@$index"
+            }
+        }.joinToString("|")
+    }
     val stableRowItems = remember(rowItems.size, rowItemsContentKey) {
         if (rowItems.isEmpty()) emptyList() else rowItems.toList()
+    }
+    // One key per item that stays the same while the item stays in the row. Keys used to
+    // include the selection flag, so every D-pad press disposed and rebuilt the card losing
+    // focus and the card gaining it (new image request, focus-scale animation never ran).
+    // A movie and a series can share a TMDB id, hence the type; a repeat of the same item
+    // gets a suffix, because duplicate keys crash a lazy list.
+    val itemKeys = remember(stableRowItems) {
+        uniqueLazyKeys(stableRowItems) { item ->
+            when (item) {
+                is Media -> "m_${item.mediaType}_${item.id}"
+                is CategoryCard -> "c_${item.type}_${item.id}"
+                is CarouselPlaceholderItem -> "ph"
+                else -> "i_${item.hashCode()}"
+            }
+        }
     }
 
     Box(
@@ -1022,15 +1002,6 @@ fun <T> EnhancedMediaCarousel(
             .fillMaxWidth()
             .height(heightDp.dp)
     ) {
-        // Force recomposition when selection changes by using a key
-        remember(selectedIndex.value, isCarouselSelected) {
-            mutableIntStateOf(if (isCarouselSelected) selectedIndex.value else -1) 
-        }
-        
-        // Force the entire carousel to recompose when selection changes
-        // This key ensures LazyRow and all its children recompose
-        val recomposeKey = if (isCarouselSelected) selectedIndex.value else -1
-        
         // Calculate an effective selected index that disables selection when carousel isn't selected
         val effectiveSelectedIndex = if (!isCarouselSelected || selectedIndex.value < 0) -1 else selectedIndex.value
 
@@ -1064,14 +1035,12 @@ fun <T> EnhancedMediaCarousel(
             if (stableRowItems.isNotEmpty()) {
                 itemsIndexed(
                     items = stableRowItems,
-                    key = { index, item ->
-                        // Include selection state in the key to force recomposition when selection changes
-                        val isItemSelected = index == effectiveSelectedIndex && isCarouselSelected
+                    key = { index, _ -> itemKeys[index] },
+                    contentType = { _, item ->
                         when (item) {
-                            is Media -> "${category.name}_${item.id}_${index}_$isItemSelected"
-                            is CategoryCard -> "${category.name}_${item.id}_${index}_$isItemSelected"
-                            is CarouselPlaceholderItem -> "${category.name}_placeholder_${index}_$recomposeKey"
-                            else -> "${category.name}_item_${index}_$isItemSelected"
+                            is CarouselPlaceholderItem -> 0
+                            is CategoryCard -> 1
+                            else -> 2
                         }
                     }
                 ) { index, item ->
@@ -1092,21 +1061,20 @@ fun <T> EnhancedMediaCarousel(
                         )
                     }
                     
-                    // Additional check - update the ScrollPositionManager if needed
-                    val categoryKey = "${category.name}_index"
-                    val managerIndex = ScrollPositionManager.getUserIndex(categoryKey)
-                    if (isSelected && managerIndex != index) {
-                        ScrollPositionManager.saveUserIndex(categoryKey, index)
+                    // Keep the ScrollPositionManager in step with the selection. In a SideEffect
+                    // so it runs once the composition is applied, not while composing.
+                    if (isSelected) {
+                        SideEffect {
+                            val categoryKey = "${category.name}_index"
+                            if (ScrollPositionManager.getUserIndex(categoryKey) != index) {
+                                ScrollPositionManager.saveUserIndex(categoryKey, index)
+                            }
+                        }
                     }
 
                     Box {
                         // Render the specific item component using the provided lambda
                         renderItem(item, isSelected)
-
-                        // When this item is selected, update the lastSelectedIndex for scroll position tracking
-                        if (isSelected) {
-                            rowState.lastSelectedIndex = index
-                        }
                     }
                 }
             }

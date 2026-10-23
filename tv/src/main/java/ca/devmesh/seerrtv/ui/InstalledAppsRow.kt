@@ -17,7 +17,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.res.stringResource
@@ -98,7 +98,9 @@ private fun AppTile(
     isSelected: Boolean,
     holdToReorderProgress: Float = 0f
 ) {
-    val scale by animateFloatAsState(if (isSelected) 1.08f else 1f, label = "appTileScale")
+    // State, not a delegated value: read inside graphicsLayer so the focus animation only
+    // redraws the layer each frame instead of recomposing the whole card.
+    val scale = animateFloatAsState(if (isSelected) 1.08f else 1f, label = "appTileScale")
     val bitmap = remember(app.packageName) {
         app.icon?.let { drawable ->
             try {
@@ -110,7 +112,7 @@ private fun AppTile(
     }
     Box(
         modifier = Modifier
-            .scale(scale)
+            .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
             .size(width = 140.dp, height = 72.dp)
             .clip(RoundedCornerShape(8.dp))
             .background(

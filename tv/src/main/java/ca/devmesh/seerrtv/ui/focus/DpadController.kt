@@ -3,6 +3,7 @@ package ca.devmesh.seerrtv.ui.focus
 import android.util.Log
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -79,6 +80,34 @@ data class ScreenDpadConfig(
     val onRefresh: (() -> Unit)? = null,
     val onBack: (() -> Unit)? = null
 )
+
+/**
+ * Returns a [ScreenDpadConfig] that stays the same object across recompositions, with callbacks
+ * that always call the ones in the latest [config]. Screens build their config inline, with
+ * fresh lambdas and transition maps, so it never compared equal: on screens that recompose on
+ * every D-pad press, `LaunchedEffect(config) { registerScreen(config) }` rebuilt it, restarted
+ * the effect and registered the screen again on each press. Which callbacks are null is taken
+ * from the first config (it only depends on the build flavour).
+ */
+@Composable
+fun rememberStableDpadConfig(config: ScreenDpadConfig): ScreenDpadConfig {
+    val latest = rememberUpdatedState(config)
+    return remember(config.route, config.focusManager) {
+        config.copy(
+            onUp = config.onUp?.let { { latest.value.onUp?.invoke() } },
+            onDown = config.onDown?.let { { latest.value.onDown?.invoke() } },
+            onLeft = config.onLeft?.let { { latest.value.onLeft?.invoke() } },
+            onRight = config.onRight?.let { { latest.value.onRight?.invoke() } },
+            onEnter = config.onEnter?.let { { latest.value.onEnter?.invoke() } },
+            onEnterLongPress = config.onEnterLongPress?.let { { latest.value.onEnterLongPress?.invoke() } },
+            onEnterLongPressProgress = config.onEnterLongPressProgress?.let {
+                { started, startTimeMillis -> latest.value.onEnterLongPressProgress?.invoke(started, startTimeMillis) }
+            },
+            onRefresh = config.onRefresh?.let { { latest.value.onRefresh?.invoke() } },
+            onBack = config.onBack?.let { { latest.value.onBack?.invoke() } }
+        )
+    }
+}
 
 /**
  * Represents a focusable section within a screen

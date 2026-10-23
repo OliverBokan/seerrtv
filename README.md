@@ -371,7 +371,7 @@ For release builds, you need to configure APK signing:
 
 2. **Edit `tv/signing.properties`** with your keystore information:
    ```properties
-   storeFile=../localSigningKey.jks
+   storeFile=/path/to/your/keystore.jks
    storePassword=your_keystore_password
    keyAlias=your_key_alias
    keyPassword=your_key_password
@@ -594,6 +594,10 @@ A: Check the following:
 - Check if your server has firewall rules blocking connections
 - Verify SSL certificate settings if using HTTPS
 - For Cloudflare-protected servers, ensure service token authentication is configured correctly
+
+**Q: SeerrTV is slow to load over a slow or remote connection. Can my server help?**
+
+A: Seerr sends its API responses uncompressed. If you put it behind a reverse proxy (nginx, Caddy, Traefik, Cloudflare), turn on gzip or Brotli compression for JSON responses there. SeerrTV already asks for compressed responses, and the JSON compresses to a fraction of its size. On a local network this matters little.
 
 **Q: How do I change the authentication method?**
 

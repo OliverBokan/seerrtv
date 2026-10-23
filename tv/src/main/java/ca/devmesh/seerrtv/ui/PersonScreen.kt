@@ -35,6 +35,7 @@ import ca.devmesh.seerrtv.navigation.LocalNavController
 import ca.devmesh.seerrtv.navigation.rememberNavigationManager
 import ca.devmesh.seerrtv.R
 import ca.devmesh.seerrtv.model.Media
+import ca.devmesh.seerrtv.ui.components.uniqueLazyKeys
 import ca.devmesh.seerrtv.ui.components.AuthenticationErrorHandler
 import ca.devmesh.seerrtv.ui.components.MediaCard
 import ca.devmesh.seerrtv.util.uiTruncateForDisplay
@@ -600,7 +601,7 @@ private fun extractBackdropImages(combinedCredits: CombinedCredits?): List<Strin
     return allCredits
         .asSequence()
         .filter { !it.backdropPath.isNullOrBlank() }
-        .map { "https://image.tmdb.org/t/p/original${it.backdropPath}" }
+        .map { "https://image.tmdb.org/t/p/w1280${it.backdropPath}" }
         .distinct()
         .take(10)
         .toList() // Limit to 10 unique backdrops
@@ -631,8 +632,8 @@ fun CyclingBackdrop(
     // Get the currently selected backdrop based on focus and selection
     val selectedBackdrop = remember(currentFocus, selectedKnownForIndex, selectedCrewIndex, combinedCredits, currentBackdropIndex) {
         when (currentFocus) {
-            PersonScreenFocus.KnownFor -> combinedCredits?.cast?.getOrNull(selectedKnownForIndex)?.backdropPath?.let { "https://image.tmdb.org/t/p/original$it" }
-            PersonScreenFocus.Crew -> combinedCredits?.crew?.getOrNull(selectedCrewIndex)?.backdropPath?.let { "https://image.tmdb.org/t/p/original$it" }
+            PersonScreenFocus.KnownFor -> combinedCredits?.cast?.getOrNull(selectedKnownForIndex)?.backdropPath?.let { "https://image.tmdb.org/t/p/w1280$it" }
+            PersonScreenFocus.Crew -> combinedCredits?.crew?.getOrNull(selectedCrewIndex)?.backdropPath?.let { "https://image.tmdb.org/t/p/w1280$it" }
             else -> backdropImages.getOrNull(currentBackdropIndex)
         }
     }
@@ -819,11 +820,13 @@ fun KnownForCarousel(
         }
     }
 
+    val creditKeys = remember(credits) { uniqueLazyKeys(credits) { "${it.mediaType}_${it.id}" } }
+
     LazyRow(
         state = listState,
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp)
     ) {
-        itemsIndexed(credits) { index, credit ->
+        itemsIndexed(credits, key = { index, _ -> creditKeys[index] }) { index, credit ->
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
@@ -895,11 +898,13 @@ fun CrewCarousel(
         }
     }
 
+    val creditKeys = remember(credits) { uniqueLazyKeys(credits) { "${it.mediaType}_${it.id}" } }
+
     LazyRow(
         state = listState,
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp)
     ) {
-        itemsIndexed(credits) { index, credit ->
+        itemsIndexed(credits, key = { index, _ -> creditKeys[index] }) { index, credit ->
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier

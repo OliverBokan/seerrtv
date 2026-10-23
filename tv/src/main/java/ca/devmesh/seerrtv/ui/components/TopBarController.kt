@@ -10,6 +10,7 @@ import ca.devmesh.seerrtv.ui.focus.DpadController
 import ca.devmesh.seerrtv.navigation.baseRoute
 import ca.devmesh.seerrtv.ui.focus.TopBarFocus
 import ca.devmesh.seerrtv.ui.focus.createTopBarDpadConfig
+import ca.devmesh.seerrtv.ui.focus.rememberStableDpadConfig
 import android.util.Log
 import ca.devmesh.seerrtv.util.SharedPreferencesUtil
 
@@ -123,11 +124,16 @@ fun TopBarController(
     // On search screen the Search icon is hidden; remap TopBar(Search) to Settings so something is focused.
     // Only remap when focus is actually Search — do not override when user has moved to Settings/Series/Movies
     // or they could never leave Settings (LaunchedEffect would keep resetting to Settings on every focus change).
-    LaunchedEffect(appFocusManager.currentFocus) {
+    // Keyed on the top-bar element only (via derivedStateOf): keying on currentFocus itself made
+    // this controller recompose, rebuild its handlers and re-register with the DpadController on
+    // every D-pad move anywhere in the app.
+    val topBarFocus by remember(appFocusManager) {
+        derivedStateOf { (appFocusManager.currentFocus as? AppFocusState.TopBar)?.focus }
+    }
+    LaunchedEffect(topBarFocus) {
         val currentRoute = navController.currentDestination?.route
         val baseRoute = baseRoute(currentRoute)
-        val focus = appFocusManager.currentFocus
-        if (focus is AppFocusState.TopBar && baseRoute == "search" && focus.focus == TopBarFocus.Search) {
+        if (topBarFocus == TopBarFocus.Search && baseRoute == "search") {
             appFocusManager.setFocus(AppFocusState.TopBar(TopBarFocus.Settings))
         }
     }
@@ -359,7 +365,7 @@ fun TopBarController(
     }
     
     // Register TopBar with DPAD controller
-    val topBarConfig = createTopBarDpadConfig(
+    val topBarConfig = rememberStableDpadConfig(createTopBarDpadConfig(
         route = "topbar",
         focusManager = appFocusManager,
         onUp = handleUp,
@@ -369,7 +375,7 @@ fun TopBarController(
         onEnter = handleEnter,
         onRefresh = onRefresh,
         onBack = handleBack
-    )
+    ))
     
     LaunchedEffect(topBarConfig) {
         dpadController.registerScreen(topBarConfig)

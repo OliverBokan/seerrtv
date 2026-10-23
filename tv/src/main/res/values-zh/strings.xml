@@ -400,6 +400,9 @@
     <string name="filter_releaseDate">发布日期</string>
     <string name="filter_genres">类型</string>
     <string name="filter_keywords">关键词</string>
+    <string name="filter_excludeKeywords">排除关键词</string>
+    <string name="filter_searchKeywords">搜索关键词…</string>
+    <string name="filter_selectedCount">已选 %1$d 个</string>
     <string name="filter_originalLanguage">原始语言</string>
     <string name="filter_contentRating">内容分级</string>
     <string name="filter_runtime">时长（分钟）</string>

@@ -453,6 +453,9 @@
     <string name="filter_releaseDate">Megjelenés dátuma</string>
     <string name="filter_genres">Műfajok</string>
     <string name="filter_keywords">Kulcsszavak</string>
+    <string name="filter_excludeKeywords">Kulcsszavak kizárása</string>
+    <string name="filter_searchKeywords">Kulcsszavak keresése…</string>
+    <string name="filter_selectedCount">%1$d kiválasztva</string>
     <string name="filter_originalLanguage">Eredeti nyelv</string>
     <string name="filter_contentRating">Korhatár-besorolás</string>
     <string name="filter_runtime">Játékidő (perc)</string>

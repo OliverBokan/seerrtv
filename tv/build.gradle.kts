@@ -5,8 +5,8 @@ import java.util.Properties
 import java.util.zip.ZipFile
 
 // Single source for app version; used in defaultConfig and for direct-release APK naming
-val appVersionName = "0.33.0"
-val appVersionCode = 142
+val appVersionName = "0.34.0"
+val appVersionCode = 143
 
 plugins {
     // https://developer.android.com/jetpack/androidx/releases/hilt
@@ -87,7 +87,6 @@ android {
         versionCode = appVersionCode
         versionName = appVersionName
         buildConfigField("String", "VERSION_NAME", "\"${defaultConfig.versionName}\"")
-        buildConfigField("Boolean", "DEBUG", "true")
         buildConfigField("Boolean", "IS_DIRECT_FLAVOR", "false")
         buildConfigField("Boolean", "IS_LAUNCHER_BUILD", "false")
         buildConfigField("String", "BROWSER_CONFIG_BASE_URL", "\"${browserConfigProperties.getProperty("browser.config.base.url", "https://seerrtv.devmesh.ca")}\"")
@@ -260,6 +259,18 @@ kotlin {
     }
 }
 
+// Compose compiler reports, for finding composables that cannot skip and the unstable parameters
+// behind them. Off by default; generate with:
+//   ./gradlew :tv:compilePlayAppReleaseKotlin -PcomposeReports=true
+// Output: tv/build/compose_reports (per-composable skippability, class stability) and
+// tv/build/compose_metrics. See docs/perf-checklist-2026-10.md (B2).
+if (project.findProperty("composeReports") == "true") {
+    composeCompiler {
+        reportsDestination = layout.buildDirectory.dir("compose_reports")
+        metricsDestination = layout.buildDirectory.dir("compose_metrics")
+    }
+}
+
 baselineProfile {
     // All four variants (play/direct x app/launcher) share the same startup code path, so one
     // profile checked into src/main covers them all. Without this the plugin would emit a
@@ -313,7 +324,6 @@ dependencies {
     // Material Design & TV Components
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.core)
-    implementation(libs.androidx.tv.foundation)
     implementation(libs.androidx.foundation)
 
     // Navigation & Lifecycle
